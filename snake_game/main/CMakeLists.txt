@@ -1,2 +1,2 @@
-idf_component_register(SRCS "snake_game.c"
+idf_component_register(SRCS "snake_game.c" "joystick.c" "oled.c"
                     INCLUDE_DIRS ".")
