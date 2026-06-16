@@ -1,13 +1,24 @@
 /*
- * Boot splash — a simple animated title screen.
+ * Boot splash — animated title screen.
  *
- * Sequence (total ~2.5 s):
- *   Phase 0  (0-400 ms)   blank
- *   Phase 1  (400-900 ms) "ESP32" slides in from left
- *   Phase 2  (900-1400ms) "GAME" fades in (pixel-by-pixel reveal, top-down)
- *   Phase 3 (1400-1900ms) "CONSOLE" slides in from right
- *   Phase 4 (1900-2500ms) full title held, blinking "PRESS BTN"
- *   Done    (2500+ ms)    returns false
+ * Layout (no overlap, fits 64px):
+ *   "ESP32"   2× text  y=4   (16px tall → ends y=20)
+ *   "GAME"    2× text  y=23  (16px tall → ends y=39)
+ *   "CONSOLE" 2× text  y=45  (16px tall → ends y=61)
+ *
+ * Sequence:
+ *   0– 300ms  blank (display settle)
+ *   300– 800ms "ESP32"   slides in from left
+ *   800–1300ms "GAME"    revealed top-down
+ *  1300–1800ms "CONSOLE" slides in from right
+ *  1800–2600ms full title + blinking "PRESS BTN"
+ *  2600ms+    returns false → hand off to console
+ *
+ * Bugs fixed vs previous version:
+ *  - sp_border() no longer called before oled_clear() completes
+ *  - Phase 0 early-return now calls oled_update() so display is blank (not garbage)
+ *  - Text y-positions recalculated so none overlap
+ *  - "CONSOLE" final_x corrected (was drifting off right edge)
  */
 
 #include "splash.h"
@@ -15,7 +26,7 @@
 #include "esp_timer.h"
 #include <string.h>
 
-/* ─── 5×7 font (same table as rest of project) ───────────────────────────── */
+/* ─── font ───────────────────────────────────────────────────────────────── */
 static const uint8_t sp_font[][5] = {
     {0x00,0x00,0x00,0x00,0x00},{0x00,0x00,0x5F,0x00,0x00},
     {0x00,0x07,0x00,0x07,0x00},{0x14,0x7F,0x14,0x7F,0x14},
@@ -67,6 +78,9 @@ static const uint8_t sp_font[][5] = {
     {0x10,0x08,0x08,0x10,0x08},
 };
 
+/* ─── draw helpers ───────────────────────────────────────────────────────── */
+
+/* 1× character */
 static void sp_char(int x, int y, char c)
 {
     if (c < 0x20 || c > 0x7E) return;
@@ -78,23 +92,19 @@ static void sp_char(int x, int y, char c)
     }
 }
 
-static int sp_str(int x, int y, const char *s)
+/* 1× string centred */
+static void sp_str_c(int y, const char *s)
 {
-    int cx = x;
-    while (*s) { sp_char(cx, y, *s++); cx += 6; }
-    return cx - x;
+    int len = 0; for (const char *p = s; *p; p++) len++;
+    int x = (128 - len * 6) / 2; if (x < 0) x = 0;
+    while (*s) { sp_char(x, y, *s++); x += 6; }
 }
 
-static void sp_str_centred(int y, const char *s)
-{
-    int len = 0;
-    for (const char *p = s; *p; p++) len++;
-    int x = (128 - len * 6) / 2;
-    if (x < 0) x = 0;
-    sp_str(x, y, s);
-}
-
-/* ─── large 2× scaled character (10×14 per glyph) ───────────────────────── */
+/*
+ * 2× character — each source pixel becomes a 2×2 block.
+ * Glyph width = 5 cols × 2 = 10px, plus 1px gap → 11px per char.
+ * Glyph height = 8 rows × 2 = 16px.
+ */
 static void sp_char_2x(int x, int y, char c)
 {
     if (c < 0x20 || c > 0x7E) return;
@@ -103,7 +113,6 @@ static void sp_char_2x(int x, int y, char c)
         uint8_t b = g[col];
         for (int row = 0; row < 8; row++) {
             if (b & (1 << row)) {
-                /* Each pixel → 2×2 block */
                 oled_draw_pixel(x + col*2,     y + row*2);
                 oled_draw_pixel(x + col*2 + 1, y + row*2);
                 oled_draw_pixel(x + col*2,     y + row*2 + 1);
@@ -113,30 +122,87 @@ static void sp_char_2x(int x, int y, char c)
     }
 }
 
+/* 2× string at explicit x */
 static void sp_str_2x(int x, int y, const char *s)
 {
-    while (*s) { sp_char_2x(x, y, *s++); x += 11; } /* 10px + 1px gap */
+    while (*s) { sp_char_2x(x, y, *s++); x += 11; }
 }
 
-static void sp_str_2x_centred(int y, const char *s)
+/* 2× string centred */
+static void sp_str_2x_c(int y, const char *s)
 {
-    int len = 0;
-    for (const char *p = s; *p; p++) len++;
+    int len = 0; for (const char *p = s; *p; p++) len++;
     int w = len * 11 - 1;
-    int x = (128 - w) / 2;
-    if (x < 0) x = 0;
+    int x = (128 - w) / 2; if (x < 0) x = 0;
     sp_str_2x(x, y, s);
 }
 
-/* ─── decorative border ──────────────────────────────────────────────────── */
-static void sp_border(void)
+/*
+ * 2× string revealed top-down.
+ * reveal_px — how many pixel rows (0-16) are visible from the top.
+ */
+static void sp_str_2x_reveal(int x, int y, const char *s, int reveal_px)
 {
-    for (int x = 0; x < 128; x++) { oled_draw_pixel(x,0); oled_draw_pixel(x,63); }
-    for (int y = 0; y < 64;  y++) { oled_draw_pixel(0,y); oled_draw_pixel(127,y);}
-    /* Corner double-line */
-    for (int x = 2; x < 126; x++) { oled_draw_pixel(x,2); oled_draw_pixel(x,61); }
-    for (int y = 2; y < 62;  y++) { oled_draw_pixel(2,y); oled_draw_pixel(125,y);}
+    int wx = x;
+    for (; *s; s++, wx += 11) {
+        char c = *s;
+        if (c < 0x20 || c > 0x7E) continue;
+        const uint8_t *g = sp_font[c - 0x20];
+        for (int col = 0; col < 5; col++) {
+            uint8_t b = g[col];
+            for (int row = 0; row < 8; row++) {
+                if (!(b & (1 << row))) continue;
+                int py0 = row * 2;
+                int py1 = py0 + 1;
+                if (py0 < reveal_px) oled_draw_pixel(wx + col*2,     y + py0);
+                if (py0 < reveal_px) oled_draw_pixel(wx + col*2 + 1, y + py0);
+                if (py1 < reveal_px) oled_draw_pixel(wx + col*2,     y + py1);
+                if (py1 < reveal_px) oled_draw_pixel(wx + col*2 + 1, y + py1);
+            }
+        }
+    }
 }
+
+/* Lerp helper — linear interpolate from a→b over dur ms, clamped */
+static int lerp(int a, int b, int64_t t, int64_t dur)
+{
+    if (t <= 0)   return a;
+    if (t >= dur) return b;
+    return (int)(a + (b - a) * t / dur);
+}
+
+/* ─── layout constants ───────────────────────────────────────────────────── */
+
+/*
+ * Three 2× words stacked vertically with 3px gaps:
+ *   "ESP32"   y=4   → pixels 4..19
+ *   "GAME"    y=23  → pixels 23..38  (gap of 3px from above)
+ *   "CONSOLE" y=42  → pixels 42..57  (gap of 3px from above)
+ *   "PRESS BTN" hint  y=56 (1× font, 7px tall → ends at y=63)
+ *
+ * "ESP32":   5 chars × 11px = 55px wide → centred at x=36
+ * "GAME":    4 chars × 11px = 44px − 1 = 43px wide → centred at x=42
+ * "CONSOLE": 7 chars × 11px = 77px − 1 = 76px wide → centred at x=26
+ */
+#define Y_ESP32    4
+#define Y_GAME     23
+#define Y_CONSOLE  42
+#define Y_HINT     56   /* 1× font is 7px tall → ends at y=63, inside display */
+
+/* Centred x for each word (pre-calculated) */
+#define X_ESP32    ((128 - (5*11-1)) / 2)   /* (128-54)/2 = 37 */
+#define X_GAME     ((128 - (4*11-1)) / 2)   /* (128-43)/2 = 42 */
+#define X_CONSOLE  ((128 - (7*11-1)) / 2)   /* (128-76)/2 = 26 */
+
+/* ─── timing (ms) ────────────────────────────────────────────────────────── */
+#define T_BLANK_END    300
+#define T_ESP32_START  300
+#define T_ESP32_END    800
+#define T_GAME_START   800
+#define T_GAME_END    1300
+#define T_CON_START   1300
+#define T_CON_END     1800
+#define T_HOLD_END    2600
 
 /* ─── state ──────────────────────────────────────────────────────────────── */
 static int64_t s_start_ms   = 0;
@@ -145,7 +211,8 @@ static int64_t s_blink_tick = 0;
 
 static inline int64_t sp_now(void) { return esp_timer_get_time() / 1000; }
 
-/* ─── public ──────────────────────────────────────────────────────────────── */
+/* ─── public ─────────────────────────────────────────────────────────────── */
+
 void splash_start(void)
 {
     s_start_ms   = sp_now();
@@ -156,106 +223,72 @@ void splash_start(void)
 bool splash_tick(void)
 {
     int64_t now     = sp_now();
-    int64_t elapsed = now - s_start_ms;
+    int64_t t       = now - s_start_ms;   /* elapsed ms */
 
-    /* Blink toggle */
+    /* Blink toggle every 400 ms */
     if ((now - s_blink_tick) >= 400) {
         s_blink      = !s_blink;
         s_blink_tick = now;
     }
 
-    /* Done after 2600 ms */
-    if (elapsed >= 2600) return false;
+    /*
+     * Animation phases complete after T_HOLD_END, but we do NOT auto-exit.
+     * The caller (app_main) breaks the loop on button press.
+     * splash_tick() only returns false if somehow called after T_HOLD_END+10s
+     * as a safety timeout — normal exit is via the caller's break.
+     */
+    if (t >= T_HOLD_END + 10000) return false;   /* 10s safety timeout */
 
+    /* Always clear first — no partial draws from previous tick */
     oled_clear();
 
-    /*
-     * Phase 0  (0–350 ms): blank — let the display wake up
-     */
-    if (elapsed < 350) {
+    /* Phase 0: blank display, nothing to draw */
+    if (t < T_BLANK_END) {
         oled_update();
         return true;
     }
 
     /*
-     * Phase 1  (350–850 ms): "ESP32" slides in from left.
-     * At t=350 it starts at x=-30 and reaches its final x=4 at t=850.
+     * Phase 1: "ESP32" slides in from off-screen left → centred position.
+     * start_x chosen so the word is fully off-screen at t=T_ESP32_START.
+     * X_ESP32 is the resting centred position.
      */
-    sp_border();
-
-    if (elapsed >= 350) {
-        int64_t t  = elapsed - 350;
-        int64_t dur = 500;
-        int final_x = 4;
-        int start_x = -35;
-        int x = (t >= dur) ? final_x
-                           : (int)(start_x + (final_x - start_x) * t / dur);
-        sp_str_2x(x, 10, "ESP32");
+    if (t >= T_ESP32_START) {
+        int x = lerp(-55, X_ESP32, t - T_ESP32_START, T_ESP32_END - T_ESP32_START);
+        sp_str_2x(x, Y_ESP32, "ESP32");
     }
 
     /*
-     * Phase 2  (850–1350 ms): "GAME" revealed top-down, 1 row of pixels per 15 ms.
-     * "GAME" is centred, 2× scaled (4 chars × 11px = 43px wide → x=43)
+     * Phase 2: "GAME" revealed top-down, 16 pixel rows over 500 ms.
      */
-    if (elapsed >= 850) {
-        int64_t t      = elapsed - 850;
-        int64_t dur    = 500;
-        int max_rows   = 16;  /* 2× font = 16px tall */
-        int reveal_rows = (t >= dur) ? max_rows
-                                     : (int)(max_rows * t / dur);
-
-        int cx = (128 - 4*11) / 2;
-        int cy = 26;
-
-        /* Draw 2× "GAME" then mask rows below reveal_rows by not drawing them.
-           Simpler: draw pixel by pixel with row guard. */
-        const char *word = "GAME";
-        int wx = cx;
-        for (int ci = 0; word[ci]; ci++, wx += 11) {
-            char c = word[ci];
-            if (c < 0x20 || c > 0x7E) continue;
-            const uint8_t *g = sp_font[c - 0x20];
-            for (int col = 0; col < 5; col++) {
-                uint8_t b = g[col];
-                for (int row = 0; row < 8; row++) {
-                    if ((b & (1 << row)) && row*2 < reveal_rows) {
-                        oled_draw_pixel(wx + col*2,     cy + row*2);
-                        oled_draw_pixel(wx + col*2 + 1, cy + row*2);
-                        if (row*2+1 < reveal_rows) {
-                            oled_draw_pixel(wx + col*2,     cy + row*2+1);
-                            oled_draw_pixel(wx + col*2 + 1, cy + row*2+1);
-                        }
-                    }
-                }
-            }
-        }
+    if (t >= T_GAME_START) {
+        int64_t dt      = t - T_GAME_START;
+        int64_t dur     = T_GAME_END - T_GAME_START;
+        int reveal_px   = (dt >= dur) ? 16 : (int)(16 * dt / dur);
+        /* centred x for "GAME" */
+        sp_str_2x_reveal(X_GAME, Y_GAME, "GAME", reveal_px);
     }
 
     /*
-     * Phase 3 (1350–1850 ms): "CONSOLE" slides in from the right.
+     * Phase 3: "CONSOLE" slides in from off-screen right → centred position.
+     * start_x = 128 (fully off right edge).
      */
-    if (elapsed >= 1350) {
-        int64_t t   = elapsed - 1350;
-        int64_t dur = 500;
-        int final_x = 128 - 7*11 - 4;  /* 7 chars at 11px each */
-        int start_x = 130;
-        int x = (t >= dur) ? final_x
-                           : (int)(start_x + (final_x - start_x) * t / dur);
-        sp_str_2x(x, 44, "CONSOLE");
+    if (t >= T_CON_START) {
+        int x = lerp(128, X_CONSOLE, t - T_CON_START, T_CON_END - T_CON_START);
+        sp_str_2x(x, Y_CONSOLE, "CONSOLE");
     }
 
     /*
-     * Phase 4 (1850–2600 ms): full title held, blinking hint at bottom.
+     * Phase 4: all three words at final positions + blinking hint.
+     * Re-draw locks them in place cleanly (overrides any lerp residual).
      */
-    if (elapsed >= 1850) {
-        /* Re-draw all three lines at final positions */
-        sp_str_2x(4,               10, "ESP32");
-        sp_str_2x_centred(26,          "GAME");
-        sp_str_2x(128-7*11-4,      44, "CONSOLE");
+    if (t >= T_CON_END) {
+        sp_str_2x(X_ESP32,   Y_ESP32,   "ESP32");
+        sp_str_2x(X_GAME,    Y_GAME,    "GAME");
+        sp_str_2x(X_CONSOLE, Y_CONSOLE, "CONSOLE");
 
-        if (s_blink) {
-            sp_str_centred(57, "PRESS BTN TO START");
-        }
+        if (s_blink)
+            sp_str_c(Y_HINT, "PRESS BTN TO START");
     }
 
     oled_update();

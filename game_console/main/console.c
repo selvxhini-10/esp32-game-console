@@ -20,6 +20,7 @@
 #include "snake.h"
 #include "pong.h"
 #include "breakout.h"
+#include "flappy.h"
 #include "esp_timer.h"
 #include <string.h>
 #include <stdio.h>
@@ -145,6 +146,7 @@ static const GameDesc s_games[] = {
     { "SNAKE",    snake_w_init,   snake_w_input,  snake_w_tick,  snake_w_draw  },
     { "PONG",     pong_init,      pong_input,     pong_tick,     pong_draw     },
     { "BREAKOUT", breakout_init,  breakout_input, breakout_tick, breakout_draw },
+    { "FLAPPY",   flappy_init,    flappy_input,   flappy_tick,   flappy_draw   },
 };
 
 #define GAME_COUNT  ((int)(sizeof(s_games) / sizeof(s_games[0])))
@@ -422,6 +424,7 @@ void console_init(void)
     keys[0] = "hi_snake";
     keys[1] = "hi_pong";
     keys[2] = "hi_breakout";
+    keys[3] = "hi_flappy";
     for (int i = 0; i < GAME_COUNT; i++) {
         s_nvs_keys[i] = keys[i];
         s_hi[i]       = nvs_scores_get(keys[i]);

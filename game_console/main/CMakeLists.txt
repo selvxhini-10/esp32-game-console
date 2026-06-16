@@ -9,11 +9,13 @@ idf_component_register(
         "snake/snake.c"
         "pong/pong.c"
         "breakout/breakout.c"
+        "flappy/flappy.c"
     INCLUDE_DIRS
         "."
         "snake"
         "pong"
         "breakout"
+        "flappy"
     REQUIRES
         esp_timer
         freertos
