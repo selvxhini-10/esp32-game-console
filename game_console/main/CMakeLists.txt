@@ -1,0 +1,28 @@
+idf_component_register(
+    SRCS
+        "app_main.c"
+        "oled.c"
+        "joystick.c"
+        "nvs_scores.c"
+        "splash.c"
+        "console.c"
+        "snake/snake.c"
+        "pong/pong.c"
+        "breakout/breakout.c"
+    INCLUDE_DIRS
+        "."
+        "snake"
+        "pong"
+        "breakout"
+    REQUIRES
+        esp_timer
+        freertos
+        log
+        nvs_flash
+    PRIV_REQUIRES
+        driver
+        esp_adc
+        esp_driver_gpio
+        esp_driver_spi
+        esp_hw_support
+)
