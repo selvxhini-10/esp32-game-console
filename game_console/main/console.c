@@ -21,6 +21,8 @@
 #include "pong.h"
 #include "breakout.h"
 #include "flappy.h"
+#include "spaceinvaders.h"
+#include "maze.h"
 #include "esp_timer.h"
 #include <string.h>
 #include <stdio.h>
@@ -147,6 +149,8 @@ static const GameDesc s_games[] = {
     { "PONG",     pong_init,      pong_input,     pong_tick,     pong_draw     },
     { "BREAKOUT", breakout_init,  breakout_input, breakout_tick, breakout_draw },
     { "FLAPPY",   flappy_init,    flappy_input,   flappy_tick,   flappy_draw   },
+    { "INVADERS",  spaceinvaders_init, spaceinvaders_input, spaceinvaders_tick, spaceinvaders_draw },
+    { "MAZE",      maze_init,      maze_input,     maze_tick,     maze_draw     },
 };
 
 #define GAME_COUNT  ((int)(sizeof(s_games) / sizeof(s_games[0])))
@@ -425,17 +429,20 @@ void console_init(void)
     keys[1] = "hi_pong";
     keys[2] = "hi_breakout";
     keys[3] = "hi_flappy";
+    keys[4] = "hi_invaders";
+    keys[5] = "hi_maze";
     for (int i = 0; i < GAME_COUNT; i++) {
         s_nvs_keys[i] = keys[i];
         s_hi[i]       = nvs_scores_get(keys[i]);
     }
 
-    s_state       = CON_SELECTING;
+    s_state       = CON_SELECTING;   /* always start at game selector, never countdown */
     s_sel         = 0;
     s_last_score  = 0;
     s_go_sel      = GO_RETRY;
     s_pause_sel   = PAUSE_RESUME;
     s_countdown   = 3;
+    s_cd_tick     = con_now();        /* FIX: init to NOW so (now-s_cd_tick) starts at 0 */
     s_blink       = true;
     s_blink_tick  = con_now();
     s_last_dy     = 0;

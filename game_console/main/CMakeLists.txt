@@ -10,12 +10,16 @@ idf_component_register(
         "pong/pong.c"
         "breakout/breakout.c"
         "flappy/flappy.c"
+        "space invaders/spaceinvaders.c"
+        "maze/maze.c"
     INCLUDE_DIRS
         "."
         "snake"
         "pong"
         "breakout"
         "flappy"
+        "space invaders"
+        "maze"
     REQUIRES
         esp_timer
         freertos

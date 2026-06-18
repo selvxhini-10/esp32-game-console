@@ -43,18 +43,18 @@
 #define TO_FP(n)    ((n) << FP)
 #define FROM_FP(n)  ((n) >> FP)
 
-#define GRAVITY      3          /* FP units added to vy per tick   */
-#define FLAP_VY    (-38)        /* FP upward impulse on button tap */
-#define VY_MAX       28         /* FP terminal fall velocity        */
+#define GRAVITY      2          /* FP units added to vy per tick — softer fall */
+#define FLAP_VY    (-28)        /* FP upward impulse — gentler, less overshoot */
+#define VY_MAX       22         /* FP terminal fall velocity — less punishing */
 
 /* ─── pipes ──────────────────────────────────────────────────────────────── */
 #define PIPE_COUNT   2
 #define PIPE_W       8          /* pipe width in pixels             */
 #define PIPE_SPEED   2          /* pixels per tick (px, not FP)     */
-#define PIPE_SPACING 64         /* horizontal gap between pipes     */
-#define GAP_H        16         /* opening height in pixels         */
+#define PIPE_SPACING 72         /* horizontal gap between pipes — more reaction time */
+#define GAP_H        22         /* opening height in pixels — wider for playability */
 #define GAP_Y_MIN    8          /* minimum top of gap from field top*/
-#define GAP_Y_MAX   (FIELD_H - GAP_H - 8)  /* maximum top of gap   */
+#define GAP_Y_MAX   (FIELD_H - GAP_H - 6)  /* maximum top of gap — 6px bottom margin */
 
 /* ─── timing ─────────────────────────────────────────────────────────────── */
 #define TICK_MS      30         /* ~33 fps physics tick             */

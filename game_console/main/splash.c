@@ -129,14 +129,6 @@ static void sp_str_2x(int x, int y, const char *s)
 }
 
 /* 2× string centred */
-static void sp_str_2x_c(int y, const char *s)
-{
-    int len = 0; for (const char *p = s; *p; p++) len++;
-    int w = len * 11 - 1;
-    int x = (128 - w) / 2; if (x < 0) x = 0;
-    sp_str_2x(x, y, s);
-}
-
 /*
  * 2× string revealed top-down.
  * reveal_px — how many pixel rows (0-16) are visible from the top.
