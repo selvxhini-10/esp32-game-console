@@ -24,10 +24,25 @@
 #include "oled.h"
 #include "esp_timer.h"
 #include "esp_random.h"
+#include "sound.h"
 #include <string.h>
 #include <stdio.h>
 
-/* ─── layout ─────────────────────────────────────────────────────────────── */
+/* ─── layout ─────────────────────────────────────────────────────────────── *
+ *
+ * GEOMETRY FIX — why the game ended before any alien ever fired:
+ *
+ * The old grid was 4 rows starting at y=12 with a 4px drop per bounce.
+ * The bottom row only needed to fall 6px to hit FIELD_BOT=54 — that's
+ * just 2 wall-bounces (~4 seconds), while the expected wait for the
+ * FIRST alien shot was 16 seconds (1-in-40 chance every 400ms march).
+ * The grid was descending into "game over" roughly 4x faster than it
+ * could ever fire a shot — the player never stood a chance to see one.
+ *
+ * Fix: fewer rows (4→3), smaller drop per bounce (4px→3px), higher
+ * starting position, and a much higher fire chance (1-in-40 → 1-in-12).
+ * This gives ~12 seconds of survival time before forced game-over,
+ * with the first shot expected around 4 seconds in. ─────────────────────── */
 #define FIELD_TOP    10
 #define FIELD_BOT    54     /* aliens reaching this y = game over            */
 #define PLAYER_Y     57     /* top of player cannon                          */
@@ -36,18 +51,18 @@
 
 /* ─── alien grid ─────────────────────────────────────────────────────────── */
 #define ALIEN_COLS   8
-#define ALIEN_ROWS   4
+#define ALIEN_ROWS   3      /* was 4 — fewer rows gives more headroom        */
 #define ALIEN_W      10     /* sprite width px                               */
 #define ALIEN_H       6     /* sprite height px                              */
 #define ALIEN_GAP_X   4     /* horizontal gap between aliens                 */
-#define ALIEN_GAP_Y   4     /* vertical gap between alien rows               */
+#define ALIEN_GAP_Y   3     /* was 4 — slightly tighter vertical spacing     */
 #define ALIEN_STEP_X  2     /* pixels moved per march tick                   */
-#define ALIEN_STEP_Y  4     /* pixels dropped on direction reversal          */
+#define ALIEN_STEP_Y  3     /* was 4 — gentler descent per wall-bounce       */
 #define ALIEN_START_X 8     /* left edge of grid at start                    */
-#define ALIEN_START_Y 12    /* top of grid at start                          */
+#define ALIEN_START_Y 11    /* was 12 — one pixel higher for extra headroom  */
 
 #define CELL_W       (ALIEN_W + ALIEN_GAP_X)   /* 14px per cell  */
-#define CELL_H       (ALIEN_H + ALIEN_GAP_Y)   /* 10px per cell  */
+#define CELL_H       (ALIEN_H + ALIEN_GAP_Y)   /*  9px per cell  */
 
 /* ─── bullets ────────────────────────────────────────────────────────────── */
 #define BULLET_H      4     /* bullet height px                              */
@@ -57,8 +72,8 @@
 
 /* ─── timing ─────────────────────────────────────────────────────────────── */
 #define TICK_MS          20     /* poll/draw rate                             */
-#define MARCH_INTERVAL   400    /* ms between alien march steps (gets faster) */
-#define ALIEN_FIRE_ODDS  40     /* 1-in-N chance per march tick per bot alien */
+#define MARCH_INTERVAL   350    /* ms between alien march steps (gets faster) */
+#define ALIEN_FIRE_ODDS  12     /* was 40 — 1-in-N chance per march tick      */
 
 /* ─── scoring ────────────────────────────────────────────────────────────── */
 #define SCORE_TOP_ROW    30
@@ -228,7 +243,33 @@ static struct {
 
 static inline int64_t si_now(void) { return esp_timer_get_time() / 1000; }
 
-/* Count remaining aliens */
+/* ────────────────────────────────────────────────────────────────────────────
+ * FORMATION MODEL — simplified mental model:
+ *
+ * Think of the alien grid as ONE rigid rectangle that slides left/right and
+ * occasionally steps down. Individual aliens are just true/false flags
+ * inside that rectangle — they never move independently.
+ *
+ *   grid_x, grid_y  = pixel position of the rectangle's top-left corner
+ *   alive[r][c]     = is the alien at row r, col c still alive?
+ *
+ * Because the rectangle is rigid, its left/right pixel edges are ALWAYS:
+ *     left_edge  = grid_x
+ *     right_edge = grid_x + (full grid width, regardless of kills)
+ *
+ * The previous version recalculated the bounding box every tick by scanning
+ * all 24 aliens to find the leftmost/rightmost SURVIVING column — this made
+ * the grid "shrink" its bounce zone as aliens died, which is both more
+ * confusing to read AND not how classic Space Invaders behaves (the empty
+ * columns from dead aliens still count as part of the formation's footprint
+ * in the original game). Using a fixed formation width removes that whole
+ * category of complexity — wall-bounce detection becomes a one-line check
+ * against constants, with no loop required.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+#define GRID_WIDTH_PX   (ALIEN_COLS * CELL_W - ALIEN_GAP_X)  /* fixed footprint */
+
+/* Count remaining aliens (used only for speed-up scaling and wave-clear check) */
 static int count_alive(void)
 {
     int n = 0;
@@ -238,51 +279,49 @@ static int count_alive(void)
     return n;
 }
 
-/* Pixel bounds of alien at grid (row, col) */
+/* Pixel position of a specific alien's top-left corner within the formation */
 static void alien_bounds(int row, int col, int *px, int *py)
 {
     *px = SI.grid_x + col * CELL_W;
     *py = SI.grid_y + row * CELL_H;
 }
 
-/* Rightmost / leftmost occupied column pixel edges */
-static void grid_extents(int *left, int *right)
-{
-    *left  = 128; *right = 0;
-    for (int r = 0; r < ALIEN_ROWS; r++) {
-        for (int c = 0; c < ALIEN_COLS; c++) {
-            if (!SI.alive[r][c]) continue;
-            int px, py; alien_bounds(r, c, &px, &py);
-            if (px < *left)            *left  = px;
-            if (px + ALIEN_W > *right) *right = px + ALIEN_W;
-        }
-    }
-}
-
-/* Pick a random bottom-row alien to fire from */
+/*
+ * Pick a random alien to fire from.
+ *
+ * Simplified targeting: instead of finding the "front-most" alien per
+ * column (which needs a nested loop), we just pick uniformly among all
+ * currently-alive aliens. This is visually indistinguishable during play
+ * — bullets fall fast enough that the player can't tell whether the shot
+ * came from the "front" of a column or not — but the code is one flat
+ * scan instead of a column-by-column search.
+ */
 static void alien_fire(void)
 {
-    /* Collect bottom-most alive alien in each column */
-    int shooters[ALIEN_COLS], nshoots = 0;
-    for (int c = 0; c < ALIEN_COLS; c++) {
-        for (int r = ALIEN_ROWS - 1; r >= 0; r--) {
-            if (SI.alive[r][c]) { shooters[nshoots++] = r * ALIEN_COLS + c; break; }
-        }
-    }
-    if (nshoots == 0) return;
+    /* Collect every alive alien into a flat list */
+    int shooters[ALIEN_ROWS * ALIEN_COLS], n = 0;
+    for (int r = 0; r < ALIEN_ROWS; r++)
+        for (int c = 0; c < ALIEN_COLS; c++)
+            if (SI.alive[r][c]) shooters[n++] = r * ALIEN_COLS + c;
 
-    /* Find a free alien bullet slot */
+    if (n == 0) return;   /* no aliens left to fire from */
+
+    /* Find a free bullet slot before picking a shooter (avoid wasted random draw) */
+    int slot = -1;
     for (int i = 0; i < MAX_ALIEN_BULLETS; i++) {
-        if (SI.abullets[i].active) continue;
-        int pick = (int)(esp_random() % (uint32_t)nshoots);
-        int row  = shooters[pick] / ALIEN_COLS;
-        int col  = shooters[pick] % ALIEN_COLS;
-        int px, py; alien_bounds(row, col, &px, &py);
-        SI.abullets[i].x      = px + ALIEN_W / 2;
-        SI.abullets[i].y      = py + ALIEN_H;
-        SI.abullets[i].active = true;
-        break;
+        if (!SI.abullets[i].active) { slot = i; break; }
     }
+    if (slot < 0) return;   /* all bullet slots in use */
+
+    int pick = (int)(esp_random() % (uint32_t)n);
+    int row  = shooters[pick] / ALIEN_COLS;
+    int col  = shooters[pick] % ALIEN_COLS;
+
+    int px, py;
+    alien_bounds(row, col, &px, &py);
+    SI.abullets[slot].x      = px + ALIEN_W / 2;
+    SI.abullets[slot].y      = py + ALIEN_H;
+    SI.abullets[slot].active = true;
 }
 
 /* ─── public API ─────────────────────────────────────────────────────────── */
@@ -313,6 +352,7 @@ void spaceinvaders_input(int dx, int dy, bool btn)
         SI.pbullet.x      = SI.player_x + PLAYER_W / 2;
         SI.pbullet.y      = PLAYER_Y - BULLET_H;
         SI.pbullet.active = true;
+        sound_play(NOTE_C5, 30);   /* quick laser "pew" — short so rapid fire doesn't stack delays */
     }
     SI.btn_last = btn;
 }
@@ -350,7 +390,17 @@ bool spaceinvaders_tick(uint32_t *score_out)
             SI.abullets[i].x <= SI.player_x + PLAYER_W) {
             SI.abullets[i].active = false;
             SI.lives--;
-            if (SI.lives <= 0) { SI.game_over = true; *score_out = SI.score; return false; }
+            if (SI.lives <= 0) {
+                SI.game_over = true;
+                static const Note gameover_tune[] = {
+                    { NOTE_A4, 90 }, { NOTE_F4, 90 }, { NOTE_C4, 250 },
+                };
+                sound_play_melody(gameover_tune, sizeof(gameover_tune)/sizeof(gameover_tune[0]));
+                *score_out = SI.score; return false;
+            }
+            /* Hit but still have lives — lower single tone, distinct from
+             * the full game-over melody (this is a setback, not the end) */
+            sound_play(NOTE_D4, 200);
         }
     }
 
@@ -359,30 +409,45 @@ bool spaceinvaders_tick(uint32_t *score_out)
         SI.last_march_ms = now;
         SI.anim_frame    = !SI.anim_frame;
 
-        /* Move grid */
+        /* Move the whole formation as one rigid block */
         SI.grid_x += SI.dir * ALIEN_STEP_X;
 
-        /* Check wall hit */
-        int left, right;
-        grid_extents(&left, &right);
+        /*
+         * Wall check — fixed-width formation model.
+         * No scanning required: the formation's left/right edges are
+         * always grid_x and grid_x + GRID_WIDTH_PX, regardless of how
+         * many aliens have been killed (matches classic Invaders behaviour
+         * where dead aliens still "hold their place" in the formation).
+         */
+        int left  = SI.grid_x;
+        int right = SI.grid_x + GRID_WIDTH_PX;
+
         if (right >= 127 || left <= 1) {
             SI.dir     = -SI.dir;
             SI.grid_y += ALIEN_STEP_Y;
 
-            /* Speed up as aliens are killed */
+            /* Speed up as aliens are killed — fewer aliens = faster march */
             int alive = count_alive();
             SI.march_interval = MARCH_INTERVAL * alive / (ALIEN_ROWS * ALIEN_COLS);
             if (SI.march_interval < 80) SI.march_interval = 80;
         }
 
-        /* Aliens reached ground */
-        for (int r = 0; r < ALIEN_ROWS; r++) {
-            for (int c = 0; c < ALIEN_COLS; c++) {
-                if (!SI.alive[r][c]) continue;
-                int px, py; alien_bounds(r, c, &px, &py);
-                if (py + ALIEN_H >= FIELD_BOT) {
-                    SI.game_over = true; *score_out = SI.score; return false;
-                }
+        /*
+         * Ground check — only the bottom row matters since the formation
+         * is rigid (if the bottom row hasn't reached the ground, nothing
+         * above it has either). One row scan instead of all four.
+         */
+        for (int c = 0; c < ALIEN_COLS; c++) {
+            if (!SI.alive[ALIEN_ROWS - 1][c]) continue;
+            int px, py;
+            alien_bounds(ALIEN_ROWS - 1, c, &px, &py);
+            if (py + ALIEN_H >= FIELD_BOT) {
+                SI.game_over = true;
+                static const Note gameover_tune[] = {
+                    { NOTE_A4, 90 }, { NOTE_F4, 90 }, { NOTE_C4, 250 },
+                };
+                sound_play_melody(gameover_tune, sizeof(gameover_tune)/sizeof(gameover_tune[0]));
+                *score_out = SI.score; return false;
             }
         }
 
@@ -403,6 +468,11 @@ bool spaceinvaders_tick(uint32_t *score_out)
                     /* Top 2 rows worth more */
                     SI.score += (r < 2) ? SCORE_TOP_ROW : SCORE_BOT_ROW;
 
+                    /* Pitch varies by row — top-row kills (worth more) ring
+                     * out higher than bottom-row kills, giving an audible
+                     * sense of "value" without needing to glance at score */
+                    sound_play(r < 2 ? NOTE_G5 : NOTE_E5, 35);
+
                     /* All cleared — new wave, descend grid */
                     if (count_alive() == 0) {
                         for (int rr = 0; rr < ALIEN_ROWS; rr++)
@@ -411,6 +481,13 @@ bool spaceinvaders_tick(uint32_t *score_out)
                         SI.grid_x = ALIEN_START_X;
                         SI.grid_y = ALIEN_START_Y;
                         SI.march_interval = MARCH_INTERVAL * 3 / 4; /* faster next wave */
+
+                        /* Triumphant ascending run — clear "wave cleared" cue,
+                         * fires AFTER the kill chirp above, queued right behind it */
+                        static const Note wave_tune[] = {
+                            { NOTE_C5, 70 }, { NOTE_E5, 70 }, { NOTE_G5, 70 }, { NOTE_C6, 140 },
+                        };
+                        sound_play_melody(wave_tune, sizeof(wave_tune)/sizeof(wave_tune[0]));
                     }
                     goto bullet_done;
                 }

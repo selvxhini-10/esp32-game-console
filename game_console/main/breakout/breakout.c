@@ -21,6 +21,7 @@
 #include "breakout.h"
 #include "oled.h"
 #include "esp_timer.h"
+#include "sound.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -160,10 +161,10 @@ bool breakout_tick(uint32_t *score_out)
     int bx=FROM_FP(BK.bx), by=FROM_FP(BK.by);
 
     /* Side walls */
-    if(bx<=1){BK.vx=abs(BK.vx);BK.bx=TO_FP(2);}
-    if(bx+BALL_R*2>=127){BK.vx=-abs(BK.vx);BK.bx=TO_FP(127-BALL_R*2);}
+    if(bx<=1){BK.vx=abs(BK.vx);BK.bx=TO_FP(2); sound_play(NOTE_E4, 25);}
+    if(bx+BALL_R*2>=127){BK.vx=-abs(BK.vx);BK.bx=TO_FP(127-BALL_R*2); sound_play(NOTE_E4, 25);}
     /* Top */
-    if(by<=1){BK.vy=abs(BK.vy);BK.by=TO_FP(2);}
+    if(by<=1){BK.vy=abs(BK.vy);BK.by=TO_FP(2); sound_play(NOTE_E4, 25);}
 
     /* Paddle */
     bx=FROM_FP(BK.bx); by=FROM_FP(BK.by);
@@ -174,12 +175,16 @@ bool breakout_tick(uint32_t *score_out)
         int off=(bx+BALL_R)-(BK.paddle_x+PADDLE_W/2);
         BK.vx=(off*BALL_SPEED)/(PADDLE_W/2);
         if(BK.vx==0) BK.vx=1;
+        sound_play(NOTE_C5, 35);   /* slightly higher pitch than wall bounce */
     }
 
     /* Brick collision — check the 4 corners of ball AABB */
     bx=FROM_FP(BK.bx); by=FROM_FP(BK.by);
     int check_pts[4][2]={{bx,by},{bx+BALL_R*2,by},{bx,by+BALL_R*2},{bx+BALL_R*2,by+BALL_R*2}};
     bool hit_v=false, hit_h=false;
+    bool brick_hit_this_tick=false;   /* prevents duplicate sounds when the
+                                        * 4-corner check clears >1 brick in
+                                        * the same tick — only one sound */
 
     for(int p=0;p<4;p++){
         int px=check_pts[p][0], py=check_pts[p][1];
@@ -203,14 +208,32 @@ bool breakout_tick(uint32_t *score_out)
         brick_clear(col,row);
         /* Top rows worth more */
         BK.score += (uint32_t)(BRICK_ROWS - row) * 10;
+        brick_hit_this_tick = true;
     }
     if(hit_v) BK.vy=-BK.vy;
     if(hit_h) BK.vx=-BK.vx;
 
+    if (brick_hit_this_tick) {
+        /* Bright, percussive — distinct from the lower-pitched wall/paddle
+         * bounces so brick destruction reads as "progress" not just "bounce" */
+        sound_play(NOTE_G5, 30);
+    }
+
     /* Lost ball */
     if(FROM_FP(BK.by)>64){
         BK.lives--;
-        if(BK.lives<=0){ BK.alive=false; *score_out=BK.score; return false; }
+        if(BK.lives<=0){
+            BK.alive=false;
+            static const Note gameover_tune[] = {
+                { NOTE_A4, 90 }, { NOTE_F4, 90 }, { NOTE_C4, 250 },
+            };
+            sound_play_melody(gameover_tune, sizeof(gameover_tune)/sizeof(gameover_tune[0]));
+            *score_out=BK.score; return false;
+        }
+        /* Lost a life but still have lives left — lower, single "ouch"
+         * tone distinct from full game-over so the player can tell the
+         * difference by ear (this is a setback, not the end) */
+        sound_play(NOTE_D4, 200);
         reset_ball();
     }
 
@@ -218,6 +241,12 @@ bool breakout_tick(uint32_t *score_out)
     if(bricks_remaining()==0){
         BK.score+=100;
         memset(s_bricks,0xFF,sizeof(s_bricks)); /* new wave */
+        /* Triumphant ascending run — clearly different from both the brick-hit
+         * tick and the game-over stings, marks a genuine milestone */
+        static const Note wave_tune[] = {
+            { NOTE_C5, 70 }, { NOTE_E5, 70 }, { NOTE_G5, 70 }, { NOTE_C6, 140 },
+        };
+        sound_play_melody(wave_tune, sizeof(wave_tune)/sizeof(wave_tune[0]));
     }
 
     *score_out=BK.score;

@@ -2,6 +2,7 @@
 #include "oled.h"
 #include "esp_random.h"
 #include "esp_timer.h"
+#include "sound.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -321,13 +322,29 @@ SnakeStatus snake_tick(SnakeGame *g)
     int ny = old_head.y + dy;
 
     /* Wall */
-    if (nx<0||nx>=GRID_W||ny<0||ny>=GRID_H)
-        { g->status=SNAKE_DEAD_WALL; return g->status; }
+    if (nx<0||nx>=GRID_W||ny<0||ny>=GRID_H) {
+        g->status = SNAKE_DEAD_WALL;
+        /* Descending death melody — was 3 separate sound_play() calls,
+         * now one atomic melody so it can't be interrupted/interleaved
+         * by another sound queued at nearly the same instant. */
+        static const Note death_tune[] = {
+            { NOTE_A4, 90 }, { NOTE_F4, 90 }, { NOTE_D4, 90 }, { NOTE_C4, 280 },
+        };
+        sound_play_melody(death_tune, sizeof(death_tune)/sizeof(death_tune[0]));
+        return g->status;
+    }
 
     /* Self — vacate tail first */
     SnakeCell tail = body_at(g, g->length-1);
     occ_set(tail.x, tail.y, false);
-    if (occ_get(nx, ny)) { g->status=SNAKE_DEAD_SELF; return g->status; }
+    if (occ_get(nx, ny)) {
+        g->status = SNAKE_DEAD_SELF;
+        static const Note death_tune[] = {
+            { NOTE_A4, 90 }, { NOTE_F4, 90 }, { NOTE_D4, 90 }, { NOTE_C4, 280 },
+        };
+        sound_play_melody(death_tune, sizeof(death_tune)/sizeof(death_tune[0]));
+        return g->status;
+    }
 
     /* Move */
     g->head_idx = (g->head_idx+1) % SNAKE_MAX_LEN;
@@ -341,6 +358,11 @@ SnakeStatus snake_tick(SnakeGame *g)
         g->score += 10;
         g->food_eaten++;
         occ_set(tail.x, tail.y, true);   /* tail didn't slide */
+
+        /* Quick upward two-note "eat" chirp instead of a single tone —
+         * sounds more like a satisfying "pickup" than a flat beep */
+        static const Note eat_tune[] = { { NOTE_G4, 35 }, { NOTE_C5, 50 } };
+        sound_play_melody(eat_tune, sizeof(eat_tune)/sizeof(eat_tune[0]));
 
         if ((g->food_eaten % SPEED_FOOD_INTERVAL) == 0) {
             g->step_ms -= SPEED_STEP_MS;

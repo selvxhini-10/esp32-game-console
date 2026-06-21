@@ -19,6 +19,7 @@
 #include "pong.h"
 #include "oled.h"
 #include "esp_timer.h"
+#include "sound.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -161,11 +162,11 @@ bool pong_tick(uint32_t *score_out)
     int bpy = FROM_FP(P.by);
 
     /* Wall: left */
-    if (bpx <= 1) { P.vx = abs(P.vx); P.bx = TO_FP(1); }
+    if (bpx <= 1) { P.vx = abs(P.vx); P.bx = TO_FP(1); sound_play(NOTE_E4, 25); }
     /* Wall: right */
-    if (bpx + BALL_SIZE >= P_W-1) { P.vx = -abs(P.vx); P.bx = TO_FP(P_W-1-BALL_SIZE); }
+    if (bpx + BALL_SIZE >= P_W-1) { P.vx = -abs(P.vx); P.bx = TO_FP(P_W-1-BALL_SIZE); sound_play(NOTE_E4, 25); }
     /* Wall: top */
-    if (bpy <= 1) { P.vy = abs(P.vy); P.by = TO_FP(1); }
+    if (bpy <= 1) { P.vy = abs(P.vy); P.by = TO_FP(1); sound_play(NOTE_E4, 25); }
 
     /* Paddle collision */
     bpx = FROM_FP(P.bx); bpy = FROM_FP(P.by);
@@ -184,17 +185,35 @@ bool pong_tick(uint32_t *score_out)
 
         P.score += 5;
         P.hits++;
+
+        /* Paddle hit is a slightly higher pitch than wall bounces — gives
+         * the player audible confirmation they actually returned the ball
+         * vs just hearing a generic "bounce" from the walls. */
+        sound_play(NOTE_C5, 35);
+
         if ((P.hits % HIT_INTERVAL) == 0) {
             P.speed += BALL_SPEED_INC;
             /* Rescale velocity to new speed */
             P.vx = (P.vx > 0) ? P.speed : -P.speed;
             P.vy = -P.speed;
+
+            /* Distinct "speed up" cue — two quick rising notes, separate
+             * from the single-note paddle hit so the player notices the
+             * difficulty increase without having to watch the ball speed */
+            static const Note speedup_tune[] = { { NOTE_G4, 40 }, { NOTE_C5, 60 } };
+            sound_play_melody(speedup_tune, sizeof(speedup_tune)/sizeof(speedup_tune[0]));
         }
     }
 
     /* Miss */
     if (FROM_FP(P.by) > P_H + 4) {
         P.alive = false;
+        /* Descending "miss" melody — distinct from the single bounce/hit
+         * tones so a miss is unmistakably the end of the round by ear */
+        static const Note miss_tune[] = {
+            { NOTE_A4, 90 }, { NOTE_F4, 90 }, { NOTE_C4, 250 },
+        };
+        sound_play_melody(miss_tune, sizeof(miss_tune)/sizeof(miss_tune[0]));
         *score_out = P.score;
         return false;
     }

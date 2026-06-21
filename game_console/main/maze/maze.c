@@ -30,6 +30,7 @@
 #include "oled.h"
 #include "esp_timer.h"
 #include "esp_random.h"
+#include "sound.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -302,7 +303,13 @@ void maze_input(int dx, int dy, bool btn)
         case 3: if (nr <= 0         || bwall[nr-1][nc]) blocked = true; else nr--; break;
     }
 
-    if (blocked) return;
+    if (blocked) {
+        /* Low short "bump" — confirms the input registered even though
+         * movement didn't happen, which matters a lot in a maze where
+         * walls are easy to misjudge visually under fog of war */
+        sound_play(NOTE_C4, 30);
+        return;
+    }
 
     MZ.pr = nr;
     MZ.pc = nc;
@@ -312,6 +319,7 @@ void maze_input(int dx, int dy, bool btn)
     if (coin[nr][nc]) {
         coin[nr][nc] = 0;
         MZ.score += COIN_SCORE;
+        sound_play(NOTE_E5, 45);   /* bright pickup chirp */
     }
 
     /* Check exit */
@@ -322,6 +330,15 @@ void maze_input(int dx, int dy, bool btn)
         maze_generate();
         MZ.pr = 0; MZ.pc = 0;
         update_fog(0, 0);
+
+        /* Level-complete fanfare — same "triumphant ascending run" pattern
+         * used for Breakout wave-clear and Invaders wave-clear, so players
+         * learn to associate this melody shape with "you cleared something"
+         * across the whole console rather than each game inventing its own */
+        static const Note level_tune[] = {
+            { NOTE_C5, 70 }, { NOTE_E5, 70 }, { NOTE_G5, 70 }, { NOTE_C6, 140 },
+        };
+        sound_play_melody(level_tune, sizeof(level_tune)/sizeof(level_tune[0]));
     }
 }
 

@@ -6,11 +6,13 @@ idf_component_register(
         "nvs_scores.c"
         "splash.c"
         "console.c"
+        "sound.c"
+        "pausebtn.c"
         "snake/snake.c"
         "pong/pong.c"
         "breakout/breakout.c"
         "flappy/flappy.c"
-        "space invaders/spaceinvaders.c"
+        "spaceinvaders/spaceinvaders.c"
         "maze/maze.c"
     INCLUDE_DIRS
         "."
@@ -18,7 +20,7 @@ idf_component_register(
         "pong"
         "breakout"
         "flappy"
-        "space invaders"
+        "spaceinvaders"
         "maze"
     REQUIRES
         esp_timer
@@ -30,5 +32,6 @@ idf_component_register(
         esp_adc
         esp_driver_gpio
         esp_driver_spi
+        esp_driver_ledc
         esp_hw_support
 )

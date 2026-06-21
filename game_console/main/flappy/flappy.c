@@ -24,6 +24,7 @@
 #include "oled.h"
 #include "esp_timer.h"
 #include "esp_random.h"
+#include "sound.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -188,6 +189,7 @@ void flappy_input(int dx, int dy, bool btn)
     /* Rising edge: flap on button press (not hold) */
     if (btn && !F.btn_last) {
         F.bird_vy_fp = FLAP_VY;
+        sound_play(NOTE_E4, 40);   /* quick flap tick — short so rapid flapping doesn't stack delays */
     }
     F.btn_last = btn;
 }
@@ -210,6 +212,7 @@ bool flappy_tick(uint32_t *score_out)
     /* ── ground / ceiling collision ── */
     if (bird_y + BIRD_H >= GROUND_Y || bird_y < 0) {
         F.alive = false;
+        sound_punch(120, 200);   /* low-frequency punch — more impact than a musical note for a crash */
         *score_out = F.score;
         return false;
     }
@@ -236,18 +239,25 @@ bool flappy_tick(uint32_t *score_out)
         /* Collision: top pipe rectangle */
         if (rects_overlap(BIRD_X, bird_y, BIRD_W, BIRD_H,
                           px, 0, PIPE_W, gy)) {
-            F.alive = false; *score_out = F.score; return false;
+            F.alive = false;
+            sound_punch(120, 200);   /* same impact punch as ground hit */
+            *score_out = F.score; return false;
         }
         /* Collision: bottom pipe rectangle */
         if (rects_overlap(BIRD_X, bird_y, BIRD_W, BIRD_H,
                           px, gy + GAP_H, PIPE_W, GROUND_Y - gy - GAP_H)) {
-            F.alive = false; *score_out = F.score; return false;
+            F.alive = false;
+            sound_punch(120, 200);
+            *score_out = F.score; return false;
         }
 
         /* Score: bird's right edge clears pipe's right edge */
         if (!F.pipes[i].scored && (BIRD_X + BIRD_W) > (px + PIPE_W)) {
             F.score++;
             F.pipes[i].scored = true;
+            /* Single note, not a melody — pipes clear in rapid succession
+             * and a longer tune per pipe would start to queue up awkwardly */
+            sound_play(NOTE_E5, 50);
         }
     }
 

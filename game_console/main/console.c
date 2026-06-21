@@ -5,7 +5,7 @@
  *   - Animated game-select carousel (scrolls through all registered games)
  *   - Per-game high score display (loaded from NVS on boot)
  *   - Countdown before launch
- *   - Pause menu (hold button 1 s during play)
+ *   - Pause menu (triggered by dedicated GPIO26 pushbutton, see pausebtn.c)
  *   - Game-over screen with RETRY / MAIN MENU selector
  *   - NVS high score save on every game-over
  *
@@ -17,6 +17,7 @@
 #include "console.h"
 #include "oled.h"
 #include "nvs_scores.h"
+#include "sound.h"
 #include "snake.h"
 #include "pong.h"
 #include "breakout.h"
@@ -145,12 +146,31 @@ static void snake_w_draw(void) { snake_draw(&s_snake); }
    ══════════════════════════════════════════════════════════════════════════ */
 
 static const GameDesc s_games[] = {
-    { "SNAKE",    snake_w_init,   snake_w_input,  snake_w_tick,  snake_w_draw  },
-    { "PONG",     pong_init,      pong_input,     pong_tick,     pong_draw     },
-    { "BREAKOUT", breakout_init,  breakout_input, breakout_tick, breakout_draw },
-    { "FLAPPY",   flappy_init,    flappy_input,   flappy_tick,   flappy_draw   },
-    { "INVADERS",  spaceinvaders_init, spaceinvaders_input, spaceinvaders_tick, spaceinvaders_draw },
-    { "MAZE",      maze_init,      maze_input,     maze_tick,     maze_draw     },
+    {
+        "SNAKE", snake_w_init, snake_w_input, snake_w_tick, snake_w_draw,
+        { "JOYSTICK: MOVE", "EAT APPLES TO GROW", "AVOID WALLS & SELF", NULL }
+    },
+    {
+        "PONG", pong_init, pong_input, pong_tick, pong_draw,
+        { "LEFT/RIGHT: PADDLE", "BOUNCE BALL UP", "DON'T MISS IT", NULL }
+    },
+    {
+        "BREAKOUT", breakout_init, breakout_input, breakout_tick, breakout_draw,
+        { "LEFT/RIGHT: PADDLE", "BREAK ALL BRICKS", "3 LIVES TOTAL", NULL }
+    },
+    {
+        "FLAPPY", flappy_init, flappy_input, flappy_tick, flappy_draw,
+        { "BUTTON: FLAP UP", "CLEAR THE PIPES", "AVOID GROUND/TOP", NULL }
+    },
+    {
+        "INVADERS", spaceinvaders_init, spaceinvaders_input,
+        spaceinvaders_tick, spaceinvaders_draw,
+        { "LEFT/RIGHT: MOVE", "BUTTON: SHOOT", "STOP THEM LANDING", NULL }
+    },
+    {
+        "MAZE", maze_init, maze_input, maze_tick, maze_draw,
+        { "JOYSTICK: WALK", "COLLECT COINS", "PAUSE BTN: MENU", "TO EXIT MAZE" }
+    },
 };
 
 #define GAME_COUNT  ((int)(sizeof(s_games) / sizeof(s_games[0])))
@@ -164,6 +184,7 @@ typedef enum {
     CON_COUNTDOWN,      /* 3-2-1 before launch            */
     CON_PLAYING,        /* game running                   */
     CON_PAUSED,         /* pause overlay                  */
+    CON_HELP,           /* per-game controls screen       */
     CON_GAME_OVER,      /* score + RETRY / MENU selector  */
 } ConState;
 
@@ -175,6 +196,7 @@ typedef enum {
 
 typedef enum {
     PAUSE_RESUME = 0,
+    PAUSE_HELP,
     PAUSE_QUIT,
     PAUSE_ITEM_COUNT
 } PauseItem;
@@ -189,8 +211,9 @@ static GoItem    s_go_sel      = GO_RETRY;
 static PauseItem s_pause_sel   = PAUSE_RESUME;
 static int       s_countdown   = 3;
 static int64_t   s_cd_tick     = 0;           /* ms timestamp per count     */
-static int64_t   s_btn_held_ts = 0;           /* for pause hold detection   */
-static bool      s_btn_was_held= false;
+/* NOTE: the old hold-to-pause timer state has been removed —
+ * pausing is now triggered exclusively by console_pause_request(), called
+ * from app_main when the dedicated GPIO26 pause button reports a press.   */
 
 /* blink */
 static bool    s_blink      = true;
@@ -343,38 +366,44 @@ static void draw_countdown(void)
    ────────────────────────────────────────────────────────────────────────── */
 static void draw_pause_overlay(void)
 {
-    /* Darken centre by drawing a filled rectangle (pixel overlay on 1-bit:
-       we invert by simply drawing on all pixels in a band — the contrast
-       forces a visible box even on monochrome) */
-    for (int y = 18; y <= 50; y++)
-        for (int x = 24; x <= 103; x++)
-            oled_draw_pixel(x, y);
-
-    /* Invert text region: draw background box edge */
+    /*
+     * 1-bit display note: there's no "darken" operation — a pixel is either
+     * on or off. So the overlay is a simple outlined box with text inside;
+     * the box border alone is enough to visually separate it from the game
+     * frame still drawn underneath.
+     */
     for (int x = 24; x <= 103; x++) {
-        oled_draw_pixel(x, 18); oled_draw_pixel(x, 50);
+        oled_draw_pixel(x, 16); oled_draw_pixel(x, 56);
     }
-    for (int y = 18; y <= 50; y++) {
+    for (int y = 16; y <= 56; y++) {
         oled_draw_pixel(24, y); oled_draw_pixel(103, y);
     }
 
-    /* On 1-bit displays "dark box" isn't possible without clear_pixel.
-       Instead draw the box outline only and put text inside (pixels set). */
-    /* Clear inner area first by NOT drawing it.
-       Workaround: the framebuffer was cleared before game_draw(), so
-       we draw the border box and text into it — the inside stays dark. */
+    fstr_c(20, "-- PAUSED --");
 
-    /* Re-draw border box (overwrite the fill above) */
-    /* Actually: clear the frame, let game_draw happen, then overlay text */
-    /* This function is called AFTER oled_clear()+game_draw(), so the
-       game frame is already in the buffer. We draw a solid rectangle on
-       top to act as the overlay — on SH1106 "set" = white, so white box
-       with white text isn't readable. Best approach: draw outline only + text. */
+    const char *p_items[] = { "RESUME", "HELP", "QUIT" };
+    draw_selector(p_items, PAUSE_ITEM_COUNT, (int)s_pause_sel, 30, 9);
+}
 
-    /* The cleanest 1-bit approach: don't fill, just frame + text */
-    fstr_c(23, "-- PAUSED --");
-    const char *p_items[] = { "RESUME", "QUIT" };
-    draw_selector(p_items, PAUSE_ITEM_COUNT, (int)s_pause_sel, 33, 12);
+/* ──────────────────────────────────────────────────────────────────────────
+   SCREEN: HELP  (per-game controls, shown from the pause menu)
+   ────────────────────────────────────────────────────────────────────────── */
+static void draw_help_screen(void)
+{
+    draw_border();
+
+    fstr_c(3, s_games[s_sel].name);
+    draw_hline(12);
+
+    /* Up to 4 lines of help text, centred, starting at y=17 */
+    int y = 17;
+    for (int i = 0; i < 4 && s_games[s_sel].help[i] != NULL; i++) {
+        fstr_c(y, s_games[s_sel].help[i]);
+        y += 10;
+    }
+
+    draw_hline(53);
+    if (s_blink) fstr_c(56, "BTN: BACK");
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -446,8 +475,7 @@ void console_init(void)
     s_blink       = true;
     s_blink_tick  = con_now();
     s_last_dy     = 0;
-    s_last_btn    = false;
-    s_btn_was_held= false;
+    s_last_btn    = true;   /* treat as 'already held' so first poll can't fire a spurious press */
 }
 
 void console_input(int dx, int dy, bool btn)
@@ -465,21 +493,15 @@ void console_input(int dx, int dy, bool btn)
     bool dy_new      = (dy != 0 && s_last_dy == 0);
     s_last_dy  = dy;
 
-    /* Pause hold: button held ≥1 s during play */
-    if (s_state == CON_PLAYING) {
-        if (btn) {
-            if (!s_btn_was_held) { s_btn_held_ts = now; s_btn_was_held = true; }
-            if ((now - s_btn_held_ts) >= 1000) {
-                /* Trigger pause */
-                s_state     = CON_PAUSED;
-                s_pause_sel = PAUSE_RESUME;
-                s_last_btn  = btn;
-                return;
-            }
-        } else {
-            s_btn_was_held = false;
-        }
-    }
+    /*
+     * NOTE: pausing used to be triggered here by holding the joystick
+     * button for 1 second during CON_PLAYING. That logic has been removed
+     * entirely — pause is now triggered exclusively by console_pause_request(),
+     * called from app_main when the dedicated GPIO26 pushbutton fires.
+     * This avoids any ambiguity between "holding to pause" and "holding to
+     * do something in-game" (e.g. Pong's paddle could be held in one
+     * direction for exactly 1 second and accidentally trigger a pause).
+     */
 
     s_last_btn = btn;
 
@@ -489,11 +511,13 @@ void console_input(int dx, int dy, bool btn)
     case CON_SELECTING:
         if (dy_new) {
             s_sel = (s_sel + dy + GAME_COUNT) % GAME_COUNT;
+            sound_play(NOTE_C4, 25);   /* short neutral tick on scroll */
         }
         if (btn_pressed) {
             s_countdown = 3;
             s_cd_tick   = now;
             s_state     = CON_COUNTDOWN;
+            sound_play(NOTE_G4, 60);   /* confirm chirp on game selection */
         }
         break;
 
@@ -512,15 +536,32 @@ void console_input(int dx, int dy, bool btn)
         if (dy_new) {
             int n = ((int)s_pause_sel + dy + PAUSE_ITEM_COUNT) % PAUSE_ITEM_COUNT;
             s_pause_sel = (PauseItem)n;
+            sound_play(NOTE_C4, 25);
         }
         if (btn_pressed) {
             if (s_pause_sel == PAUSE_RESUME) {
-                s_state        = CON_PLAYING;
-                s_btn_was_held = false;
+                s_state = CON_PLAYING;
+                sound_play(NOTE_E4, 60);   /* resume cue — neutral, mid pitch */
+            } else if (s_pause_sel == PAUSE_HELP) {
+                s_state = CON_HELP;
+                sound_play(NOTE_G4, 50);
             } else {
-                /* Quit to selector */
+                /* QUIT — return to selector. This is the only way to exit
+                 * Maze (or any other infinite-progression game) since it
+                 * has no natural game-over condition.                    */
                 s_state = CON_SELECTING;
+                sound_play(NOTE_C4, 80);   /* lower pitch — "leaving" cue */
             }
+        }
+        break;
+
+    /* ── HELP ── */
+    case CON_HELP:
+        /* Any button press returns to the pause menu (not straight to play —
+         * the player may want to QUIT after reading controls, not just resume) */
+        if (btn_pressed) {
+            s_state = CON_PAUSED;
+            sound_play(NOTE_C4, 40);
         }
         break;
 
@@ -529,17 +570,35 @@ void console_input(int dx, int dy, bool btn)
         if (dy_new) {
             int n = ((int)s_go_sel + dy + GO_ITEM_COUNT) % GO_ITEM_COUNT;
             s_go_sel = (GoItem)n;
+            sound_play(NOTE_C4, 25);
         }
         if (btn_pressed) {
             if (s_go_sel == GO_RETRY) {
                 s_countdown = 3;
                 s_cd_tick   = now;
                 s_state     = CON_COUNTDOWN;
+                sound_play(NOTE_G4, 60);
             } else {
                 s_state = CON_SELECTING;
+                sound_play(NOTE_C4, 80);
             }
         }
         break;
+    }
+}
+
+void console_pause_request(void)
+{
+    /*
+     * Called from app_main exactly once per debounced GPIO26 press
+     * (see pausebtn_pressed()). Only does anything while a game is
+     * actively running — pressing the pause button on the menu, during
+     * a countdown, or while already paused has no effect.
+     */
+    if (s_state == CON_PLAYING) {
+        sound_play(NOTE_E4, 50);   /* distinct "pause" cue, separate from menu sounds */
+        s_state     = CON_PAUSED;
+        s_pause_sel = PAUSE_RESUME;
     }
 }
 
@@ -560,12 +619,19 @@ void console_tick(void)
         if ((now - s_cd_tick) >= 1000) {
             s_countdown--;
             s_cd_tick = now;
+
             if (s_countdown <= 0) {
                 s_games[s_sel].init();
-                s_state        = CON_PLAYING;
-                s_btn_was_held = false;
+                s_state = CON_PLAYING;
+                /* Rising two-note "go!" launch cue */
+                static const Note launch_tune[] = { { NOTE_C5, 60 }, { NOTE_E5, 90 } };
+                sound_play_melody(launch_tune, sizeof(launch_tune)/sizeof(launch_tune[0]));
                 break;
             }
+
+            /* Tick on each "3", "2", "1" — same pitch each time keeps it
+             * neutral/rhythmic rather than melodic, like a real countdown */
+            sound_play(NOTE_A4, 50);
         }
         draw_countdown();
         break;
@@ -577,11 +643,31 @@ void console_tick(void)
         s_games[s_sel].draw();
         if (!alive) {
             s_last_score = sc;
+            bool new_best = (sc > s_hi[s_sel]);
+
             /* Update high score in RAM + NVS */
-            if (sc > s_hi[s_sel]) {
+            if (new_best) {
                 s_hi[s_sel] = sc;
                 nvs_scores_set(s_nvs_keys[s_sel], sc);
             }
+
+            /*
+             * Two distinct outcomes get two distinct melodies — a player
+             * should be able to tell "new high score!" from "game over"
+             * by ear alone, without even looking at the screen.
+             */
+            if (new_best && sc > 0) {
+                static const Note hiscore_tune[] = {
+                    { NOTE_C5, 80 }, { NOTE_E5, 80 }, { NOTE_G5, 80 }, { NOTE_C6, 150 },
+                };
+                sound_play_melody(hiscore_tune, sizeof(hiscore_tune)/sizeof(hiscore_tune[0]));
+            } else {
+                static const Note gameover_tune[] = {
+                    { NOTE_G4, 90 }, { NOTE_E4, 90 }, { NOTE_C4, 200 },
+                };
+                sound_play_melody(gameover_tune, sizeof(gameover_tune)/sizeof(gameover_tune[0]));
+            }
+
             s_go_sel = GO_RETRY;
             s_state  = CON_GAME_OVER;
         }
@@ -590,9 +676,27 @@ void console_tick(void)
 
     /* ── PAUSED ── */
     case CON_PAUSED:
-        /* Draw frozen game underneath then overlay pause menu */
-        s_games[s_sel].draw();
+        /*
+         * FIX: do NOT draw the underlying game while paused.
+         *
+         * The previous version drew the live game frame first (s_games[s_sel].draw())
+         * then overlaid the pause box on top. This looked fine for Snake/Pong/Breakout
+         * since their play areas are mostly empty space, but Maze's fog-of-war fill
+         * paints large solid white blocks across ~70% of the screen — exactly where
+         * the pause box sits. On a 1-bit display there's no way to "darken" a region,
+         * so the box outline and selector text became unreadable against that fill.
+         *
+         * The reliable fix: oled_clear() was already called at the top of console_tick(),
+         * so simply skip the game draw call entirely. The screen starts blank and ONLY
+         * the pause box is drawn — guaranteed clean background regardless of which
+         * game is paused or what was on screen at the moment of pausing.
+         */
         draw_pause_overlay();
+        break;
+
+    /* ── HELP ── */
+    case CON_HELP:
+        draw_help_screen();
         break;
 
     /* ── GAME OVER ── */
