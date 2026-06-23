@@ -160,12 +160,12 @@ static const GameDesc s_games[] = {
     },
     {
         "FLAPPY", flappy_init, flappy_input, flappy_tick, flappy_draw,
-        { "BUTTON: FLAP UP", "CLEAR THE PIPES", "AVOID GROUND/TOP", NULL }
+        { "ACTION BTN: FLAP", "CLEAR THE PIPES", "AVOID GROUND/TOP", NULL }
     },
     {
         "INVADERS", spaceinvaders_init, spaceinvaders_input,
         spaceinvaders_tick, spaceinvaders_draw,
-        { "LEFT/RIGHT: MOVE", "BUTTON: SHOOT", "STOP THEM LANDING", NULL }
+        { "LEFT/RIGHT: MOVE", "ACTION BTN: SHOOT", "STOP THEM LANDING", NULL }
     },
     {
         "MAZE", maze_init, maze_input, maze_tick, maze_draw,
@@ -221,7 +221,7 @@ static int64_t s_blink_tick = 0;
 
 /* input debounce */
 static int  s_last_dy  = 0;
-static bool s_last_btn = false;
+static bool s_last_menu_btn = false;   /* joystick click only — menu navigation */
 
 /* NVS keys per game (must be ≤15 chars each) */
 static const char *s_nvs_keys[GAME_COUNT];   /* filled in console_init */
@@ -475,10 +475,10 @@ void console_init(void)
     s_blink       = true;
     s_blink_tick  = con_now();
     s_last_dy     = 0;
-    s_last_btn    = true;   /* treat as 'already held' so first poll can't fire a spurious press */
+    s_last_menu_btn = true;   /* treat as 'already held' so first poll can't fire a spurious press */
 }
 
-void console_input(int dx, int dy, bool btn)
+void console_input(int dx, int dy, bool menu_btn, bool action_btn)
 {
     int64_t now = con_now();
 
@@ -488,9 +488,15 @@ void console_input(int dx, int dy, bool btn)
         s_blink_tick = now;
     }
 
-    /* Edge detection */
-    bool btn_pressed = (btn && !s_last_btn);
-    bool dy_new      = (dy != 0 && s_last_dy == 0);
+    /*
+     * Edge detection for the MENU button (joystick click) only.
+     * The action button (GPIO27) is forwarded to games as a raw level —
+     * each game's own input() function decides whether it wants edge
+     * detection (e.g. Flappy fires on press, not hold) or a held-state
+     * read, exactly like joystick axis handling elsewhere in this project.
+     */
+    bool menu_btn_pressed = (menu_btn && !s_last_menu_btn);
+    bool dy_new           = (dy != 0 && s_last_dy == 0);
     s_last_dy  = dy;
 
     /*
@@ -498,12 +504,14 @@ void console_input(int dx, int dy, bool btn)
      * button for 1 second during CON_PLAYING. That logic has been removed
      * entirely — pause is now triggered exclusively by console_pause_request(),
      * called from app_main when the dedicated GPIO26 pushbutton fires.
-     * This avoids any ambiguity between "holding to pause" and "holding to
-     * do something in-game" (e.g. Pong's paddle could be held in one
-     * direction for exactly 1 second and accidentally trigger a pause).
+     *
+     * Button responsibilities are now fully separated:
+     *   - menu_btn   (joystick click) → menu navigation ONLY, never gameplay
+     *   - action_btn (GPIO27)         → in-game action ONLY, never menus
+     *   - pause request (GPIO26)      → handled entirely via console_pause_request()
      */
 
-    s_last_btn = btn;
+    s_last_menu_btn = menu_btn;
 
     switch (s_state) {
 
@@ -513,7 +521,7 @@ void console_input(int dx, int dy, bool btn)
             s_sel = (s_sel + dy + GAME_COUNT) % GAME_COUNT;
             sound_play(NOTE_C4, 25);   /* short neutral tick on scroll */
         }
-        if (btn_pressed) {
+        if (menu_btn_pressed) {
             s_countdown = 3;
             s_cd_tick   = now;
             s_state     = CON_COUNTDOWN;
@@ -528,7 +536,10 @@ void console_input(int dx, int dy, bool btn)
 
     /* ── PLAYING ── */
     case CON_PLAYING:
-        s_games[s_sel].input(dx, dy, btn);
+        /* action_btn (GPIO27) is the ONLY button forwarded to gameplay.
+         * Joystick click (menu_btn) is intentionally NOT passed through —
+         * it has no effect during gameplay at all. */
+        s_games[s_sel].input(dx, dy, action_btn);
         break;
 
     /* ── PAUSED ── */
@@ -538,7 +549,7 @@ void console_input(int dx, int dy, bool btn)
             s_pause_sel = (PauseItem)n;
             sound_play(NOTE_C4, 25);
         }
-        if (btn_pressed) {
+        if (menu_btn_pressed) {
             if (s_pause_sel == PAUSE_RESUME) {
                 s_state = CON_PLAYING;
                 sound_play(NOTE_E4, 60);   /* resume cue — neutral, mid pitch */
@@ -559,7 +570,7 @@ void console_input(int dx, int dy, bool btn)
     case CON_HELP:
         /* Any button press returns to the pause menu (not straight to play —
          * the player may want to QUIT after reading controls, not just resume) */
-        if (btn_pressed) {
+        if (menu_btn_pressed) {
             s_state = CON_PAUSED;
             sound_play(NOTE_C4, 40);
         }
@@ -572,7 +583,7 @@ void console_input(int dx, int dy, bool btn)
             s_go_sel = (GoItem)n;
             sound_play(NOTE_C4, 25);
         }
-        if (btn_pressed) {
+        if (menu_btn_pressed) {
             if (s_go_sel == GO_RETRY) {
                 s_countdown = 3;
                 s_cd_tick   = now;

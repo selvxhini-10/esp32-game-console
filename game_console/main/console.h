@@ -30,15 +30,26 @@ void console_init(void);
 
 /*
  * Call every poll tick (20 ms).
- * dx/dy from joystick, btn = joystick click (active-low, already inverted).
+ *
+ * dx/dy        — joystick axes, used for menu navigation AND forwarded to
+ *                the active game for movement (paddle, snake direction, etc).
+ * menu_btn     — joystick click. Used ONLY for menu navigation: selecting
+ *                a game, confirming pause-menu items, dismissing help/
+ *                game-over screens. NEVER forwarded to gameplay.
+ * action_btn   — dedicated GPIO27 action button. Forwarded ONLY to the
+ *                active game's input() call as its "jump/flap/shoot/fire"
+ *                control. Has no effect on menu navigation.
+ *
+ * This split exists so the joystick click and the GPIO27 action button
+ * can never collide or double-trigger the same logical action — each
+ * button has exactly one job, everywhere in the console.
  */
-void console_input(int dx, int dy, bool btn);
+void console_input(int dx, int dy, bool menu_btn, bool action_btn);
 
 /*
  * Call this whenever the dedicated pause pushbutton (GPIO26) reports a
  * fresh press (see pausebtn_pressed()). This is the ONLY way to enter
- * CON_PAUSED — the joystick click no longer triggers pause via a hold
- * gesture. Has no effect outside CON_PLAYING.
+ * CON_PAUSED. Has no effect outside CON_PLAYING.
  */
 void console_pause_request(void);
 

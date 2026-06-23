@@ -8,6 +8,7 @@ idf_component_register(
         "console.c"
         "sound.c"
         "pausebtn.c"
+        "actionbtn.c"
         "snake/snake.c"
         "pong/pong.c"
         "breakout/breakout.c"
@@ -27,6 +28,7 @@ idf_component_register(
         freertos
         log
         nvs_flash
+        esp_system
     PRIV_REQUIRES
         driver
         esp_adc

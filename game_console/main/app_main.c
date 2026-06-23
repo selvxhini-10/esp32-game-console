@@ -10,6 +10,7 @@
 #include "console.h"
 #include "sound.h"
 #include "pausebtn.h"
+#include "actionbtn.h"
 
 static const char *TAG = "main";
 
@@ -36,8 +37,9 @@ void app_main(void)
     nvs_scores_init();
     joystick_init();
     oled_init();
-    sound_init();       /* GPIO13 passive buzzer via LEDC PWM            */
-    pausebtn_init();    /* GPIO26 dedicated pause pushbutton, debounced  */
+    sound_init();       /* GPIO13 passive buzzer via LEDC PWM                */
+    pausebtn_init();    /* GPIO26 dedicated pause pushbutton, debounced      */
+    actionbtn_init();   /* GPIO27 dedicated in-game action button, debounced */
 
     /* Boot fanfare — fires once, roughly synced with the splash animation
      * starting. A short ascending arpeggio gives the console an audible
@@ -134,16 +136,17 @@ void app_main(void)
      *
      * Problem: the button press that dismissed the splash may still be
      * physically held when we reach console_init(). console_input() uses
-     * rising-edge detection via s_last_btn (initialised false). So:
+     * rising-edge detection via s_last_menu_btn (initialised true). So:
      *
-     *   s_last_btn = false  (set by console_init)
-     *   first poll: joy_btn = true  (button still held from splash dismiss)
-     *   btn_pressed = (true && !false) = TRUE  ← spurious press detected
-     *   → CON_SELECTING fires CON_COUNTDOWN immediately
-     *   → 3-2-1 Snake appears before menu ever draws
+     *   s_last_menu_btn = true   (set by console_init, see its own comment)
+     *   first poll: menu_btn = true  (still held from splash dismiss)
+     *   menu_btn_pressed = (true && !true) = FALSE  ← correctly suppressed
      *
-     * Fix A — wait for physical release (max 800ms timeout so we don't
-     * block forever if the button hardware reads 0 at rest):
+     * console_init() already defends against this by initialising
+     * s_last_menu_btn = true rather than false (see console.c). The wait-
+     * for-release loop below is an additional defensive layer so the
+     * button is also physically released before we ever read it again,
+     * keeping behaviour predictable regardless of timing.
      */
     {
         int64_t release_deadline = now_ms() + 800;
@@ -156,15 +159,12 @@ void app_main(void)
         ESP_LOGI(TAG, "Button state at console entry: %d", j.button);
 
         /*
-         * Fix B — regardless of whether the button is physically released,
-         * prime the edge-detector so the first seen state is NOT treated as
-         * a fresh press. We do this by calling console_input() once with the
-         * CURRENT button state before entering the main loop. This sets
-         * s_last_btn to the current value, so the next call only fires a
-         * press event on a genuine new press.
+         * Prime the menu-button edge-detector with the current joystick
+         * state before entering the main loop, and pass action_btn=false
+         * since no game is active yet (CON_SELECTING ignores it anyway).
          */
-        bool btn_now = (j.button == 0);
-        console_input(0, 0, btn_now);   /* prime edge detector, no direction */
+        bool menu_btn_now = (j.button == 0);
+        console_input(0, 0, menu_btn_now, false);   /* prime edge detector, no direction */
     }
 
     ESP_LOGI(TAG, "Entering console loop");
@@ -174,15 +174,28 @@ void app_main(void)
 
         int  joy_dx  = (j.x < 1000) ? -1 : (j.x > 3000) ?  1 : 0;
         int  joy_dy  = (j.y < 1000) ? -1 : (j.y > 3000) ?  1 : 0;
-        bool joy_btn = (j.button == 0);
-
-        console_input(joy_dx, joy_dy, joy_btn);
 
         /*
-         * Dedicated pause button (GPIO26) — completely separate from the
-         * joystick click. pausebtn_pressed() already debounces and returns
-         * true exactly once per physical press, so no edge-detection is
-         * needed here; just forward it straight to the console.
+         * Button responsibilities — three physically distinct buttons,
+         * three distinct jobs, never overlapping:
+         *
+         *   menu_btn   (joystick click)  → menu navigation only
+         *   action_btn (GPIO27)          → in-game jump/flap/shoot/fire only
+         *   pause      (GPIO26)          → pause request only (handled below)
+         *
+         * The joystick click no longer does anything during gameplay —
+         * games receive action_btn instead, read directly from GPIO27.
+         */
+        bool menu_btn   = (j.button == 0);
+        bool action_btn = actionbtn_is_pressed();
+
+        console_input(joy_dx, joy_dy, menu_btn, action_btn);
+
+        /*
+         * Dedicated pause button (GPIO26) — completely separate from both
+         * the joystick click and the action button. pausebtn_pressed()
+         * already debounces and returns true exactly once per physical
+         * press, so no edge-detection is needed here; just forward it.
          */
         if (pausebtn_pressed()) {
             console_pause_request();
