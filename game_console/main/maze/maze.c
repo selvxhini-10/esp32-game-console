@@ -1,171 +1,99 @@
 /*
- * MAZE / DUNGEON — ESP32 OLED console game
+ * MAZE / DUNGEON — 128x160 color version.
  *
- * Algorithm: Recursive backtracker (iterative with explicit stack to avoid
- * C call-stack overflow on ESP32 where task stacks are limited).
+ * LAYOUT CHANGE FROM 128x64 MONO:
+ *   Old: 13x7 grid (91 cells) using 8px cells in a 104x56 play area
+ *   New: 14x16 grid (224 cells) using 9px cells in a 126x144 play area
+ *        — both more cells AND bigger cells, since the screen gained
+ *        far more area than it lost in any dimension.
  *
- * Grid: 13×7 cells (each cell = 8×8 pixels, walls on shared edges)
- *   Display area: 104×56 pixels leaving a 12px HUD strip at top.
- *   Wall between cells = 1 pixel; cell interior = 6×6 pixels.
- *
- * Memory:
- *   Walls stored as two bitfields per cell:
- *     h_walls[row][col] = 1 if wall exists on RIGHT edge of cell(row,col)
- *     v_walls[row][col] = 1 if wall exists on BOTTOM edge of cell(row,col)
- *   8 bytes each → 112 bytes total for a 13×7 maze.
- *
- *   Visited/coin flags: 1 bit each → 2 × 12 bytes = 24 bytes.
- *
- * Fog of war: cells within Manhattan distance 2 of player are revealed.
- * Revealed state is persistent (cells stay visible once seen).
- *
- * Layout:
- *   y=0..8    HUD (score, timer, level)
- *   y=9       separator
- *   y=10..63  maze play area (54px = 7 cells × (6px interior + 1px wall) + 1)
- *   x=0..103  maze (13 cells × 8px = 104px, centred → x_offset=12)
+ * COLOR ADDITION — fog of war becomes much more readable:
+ *   Old: unrevealed cells were solid filled squares (1-bit "dark")
+ *   New: unrevealed cells are dark navy (still clearly "unknown"),
+ *        revealed cells are black with visible wall lines, the
+ *        player is a bright cyan square, coins are gold, and the
+ *        exit cell glows green once revealed. The color vocabulary
+ *        ("dark blue = unexplored", "green = goal") reads instantly
+ *        compared to monochrome's single on/off language.
  */
 
 #include "maze.h"
-#include "oled.h"
+#include "tft.h"
+#include "font.h"
+#include "palette.h"
+#include "effects.h"
 #include "esp_timer.h"
 #include "esp_random.h"
 #include "sound.h"
 #include <string.h>
 #include <stdio.h>
 
-/* ─── grid dimensions ────────────────────────────────────────────────────── */
-#define MZ_COLS     13
-#define MZ_ROWS      7
-#define CELL_PX      8      /* pixels per cell (including shared wall)       */
-#define WALL_PX      1      /* wall thickness in pixels                      */
-#define INNER_PX     6      /* cell interior size (CELL_PX - WALL_PX - 1)   */
+/*
+ * Grid dimensions recalculated for the landscape 160x128 screen.
+ *
+ * Previous values (MZ_COLS=14, MZ_ROWS=16, CELL_PX=9) produced a grid
+ * spanning y=18 to y=162 — 34px TALLER than the 128px screen, running
+ * off the bottom edge entirely (confirmed in testing photos). The grid
+ * shape (14 wide x 16 tall, narrow-and-tall) was clearly sized for the
+ * earlier PORTRAIT orientation and never updated after the landscape
+ * rotation.
+ *
+ * New values: 17 wide x 12 tall at the same 9px cell size. This is a
+ * landscape-appropriate shape (wider than tall, matching the screen's
+ * own aspect ratio) that fits with only 6px of combined leftover space
+ * across both axes, instead of overflowing by 34px vertically.
+ */
+#define MZ_COLS     17
+#define MZ_ROWS     12
+#define CELL_PX      9
+#define WALL_PX      1
+#define INNER_PX     7
 
-#define MZ_X_OFF    12      /* pixel x of maze left edge                     */
-#define MZ_Y_OFF    10      /* pixel y of maze top edge                      */
+#define MZ_X_OFF    1
+#define MZ_Y_OFF    18    /* below a 16px HUD + 2px gap */
 
-/* ─── derived pixel helpers ──────────────────────────────────────────────── */
-/* Top-left pixel of cell interior */
-#define CELL_PX_X(c)  (MZ_X_OFF + (c) * CELL_PX + WALL_PX)
-#define CELL_PX_Y(r)  (MZ_Y_OFF + (r) * CELL_PX + WALL_PX)
+/* ─── color palette — now pulled from the shared palette.h ──────────────── */
+#define COL_BG          PAL_BACKGROUND
+#define COL_HUD_TEXT    PAL_TEXT
+#define COL_HUD_LINE    PAL_BORDER
+#define COL_FOG         PAL_BG_PANEL    /* unrevealed cells, was TFT_NAVY    */
+#define COL_WALL        PAL_OUTLINE
+#define COL_COIN        PAL_GOLD
+#define COL_PLAYER      PAL_BLUE_BRIGHT
+#define COL_EXIT        PAL_BLUE_MAIN
+#define COL_BUMP_FLASH  PAL_DANGER      /* unused hook for future bump-flash effect */
 
 /* ─── game tuning ────────────────────────────────────────────────────────── */
-#define FOG_RADIUS      2       /* cells revealed around player             */
-#define COIN_SCORE      20      /* points per coin                          */
-#define EXIT_SCORE      100     /* points for reaching exit                 */
-#define TIME_BONUS_MAX  200     /* max time bonus (decreases per second)    */
-#define TIME_BONUS_RATE 5       /* bonus lost per second                    */
+#define FOG_RADIUS      3       /* was 2 — slightly larger reveal radius for the bigger grid */
+#define COIN_SCORE      20
+#define EXIT_SCORE      100
+#define TIME_BONUS_MAX  200
+#define TIME_BONUS_RATE 5
 #define TICK_MS         20
 
 /* ─── wall storage ───────────────────────────────────────────────────────── */
-/*
- * h_walls[r][c] — wall on RIGHT side of cell (r,c)  (horizontal edge)
- * v_walls[r][c] — wall on BOTTOM side of cell (r,c) (vertical edge)
- * Stored as bytes (1 bit per column), packed into uint16 per row.
- * MZ_COLS=13 fits in uint16 (max 16 bits).
- */
-
-/* Actually store per-cell as full uint8 arrays for clarity on ESP32 */
-static uint8_t rwall[MZ_ROWS][MZ_COLS];   /* 1 = wall on right  */
-static uint8_t bwall[MZ_ROWS][MZ_COLS];   /* 1 = wall on bottom */
-static uint8_t vis[MZ_ROWS][MZ_COLS];     /* generation visited  */
-static uint8_t fog[MZ_ROWS][MZ_COLS];     /* fog of war: 1=seen  */
-static uint8_t coin[MZ_ROWS][MZ_COLS];    /* 1 = coin present    */
-
-/* ─── font ───────────────────────────────────────────────────────────────── */
-static const uint8_t mz_font[][5] = {
-    {0x00,0x00,0x00,0x00,0x00},{0x00,0x00,0x5F,0x00,0x00},
-    {0x00,0x07,0x00,0x07,0x00},{0x14,0x7F,0x14,0x7F,0x14},
-    {0x24,0x2A,0x7F,0x2A,0x12},{0x23,0x13,0x08,0x64,0x62},
-    {0x36,0x49,0x55,0x22,0x50},{0x00,0x05,0x03,0x00,0x00},
-    {0x00,0x1C,0x22,0x41,0x00},{0x00,0x41,0x22,0x1C,0x00},
-    {0x14,0x08,0x3E,0x08,0x14},{0x08,0x08,0x3E,0x08,0x08},
-    {0x00,0x50,0x30,0x00,0x00},{0x08,0x08,0x08,0x08,0x08},
-    {0x00,0x60,0x60,0x00,0x00},{0x20,0x10,0x08,0x04,0x02},
-    {0x3E,0x51,0x49,0x45,0x3E},{0x00,0x42,0x7F,0x40,0x00},
-    {0x42,0x61,0x51,0x49,0x46},{0x21,0x41,0x45,0x4B,0x31},
-    {0x18,0x14,0x12,0x7F,0x10},{0x27,0x45,0x45,0x45,0x39},
-    {0x3C,0x4A,0x49,0x49,0x30},{0x01,0x71,0x09,0x05,0x03},
-    {0x36,0x49,0x49,0x49,0x36},{0x06,0x49,0x49,0x29,0x1E},
-    {0x00,0x36,0x36,0x00,0x00},{0x00,0x56,0x36,0x00,0x00},
-    {0x08,0x14,0x22,0x41,0x00},{0x14,0x14,0x14,0x14,0x14},
-    {0x00,0x41,0x22,0x14,0x08},{0x02,0x01,0x51,0x09,0x06},
-    {0x32,0x49,0x79,0x41,0x3E},{0x7E,0x11,0x11,0x11,0x7E},
-    {0x7F,0x49,0x49,0x49,0x36},{0x3E,0x41,0x41,0x41,0x22},
-    {0x7F,0x41,0x41,0x22,0x1C},{0x7F,0x49,0x49,0x49,0x41},
-    {0x7F,0x09,0x09,0x09,0x01},{0x3E,0x41,0x49,0x49,0x7A},
-    {0x7F,0x08,0x08,0x08,0x7F},{0x00,0x41,0x7F,0x41,0x00},
-    {0x20,0x40,0x41,0x3F,0x01},{0x7F,0x08,0x14,0x22,0x41},
-    {0x7F,0x40,0x40,0x40,0x40},{0x7F,0x02,0x0C,0x02,0x7F},
-    {0x7F,0x04,0x08,0x10,0x7F},{0x3E,0x41,0x41,0x41,0x3E},
-    {0x7F,0x09,0x09,0x09,0x06},{0x3E,0x41,0x51,0x21,0x5E},
-    {0x7F,0x09,0x19,0x29,0x46},{0x46,0x49,0x49,0x49,0x31},
-    {0x01,0x01,0x7F,0x01,0x01},{0x3F,0x40,0x40,0x40,0x3F},
-    {0x1F,0x20,0x40,0x20,0x1F},{0x3F,0x40,0x38,0x40,0x3F},
-    {0x63,0x14,0x08,0x14,0x63},{0x07,0x08,0x70,0x08,0x07},
-    {0x61,0x51,0x49,0x45,0x43},{0x00,0x7F,0x41,0x41,0x00},
-    {0x02,0x04,0x08,0x10,0x20},{0x00,0x41,0x41,0x7F,0x00},
-    {0x04,0x02,0x01,0x02,0x04},{0x40,0x40,0x40,0x40,0x40},
-    {0x00,0x01,0x02,0x04,0x00},{0x20,0x54,0x54,0x54,0x78},
-    {0x7F,0x48,0x44,0x44,0x38},{0x38,0x44,0x44,0x44,0x20},
-    {0x38,0x44,0x44,0x48,0x7F},{0x38,0x54,0x54,0x54,0x18},
-    {0x08,0x7E,0x09,0x01,0x02},{0x0C,0x52,0x52,0x52,0x3E},
-    {0x7F,0x08,0x04,0x04,0x78},{0x00,0x44,0x7D,0x40,0x00},
-    {0x20,0x40,0x44,0x3D,0x00},{0x7F,0x10,0x28,0x44,0x00},
-    {0x00,0x41,0x7F,0x40,0x00},{0x7C,0x04,0x18,0x04,0x78},
-    {0x7C,0x08,0x04,0x04,0x78},{0x38,0x44,0x44,0x44,0x38},
-    {0x7C,0x14,0x14,0x14,0x08},{0x08,0x14,0x14,0x18,0x7C},
-    {0x7C,0x08,0x04,0x04,0x08},{0x48,0x54,0x54,0x54,0x20},
-    {0x04,0x3F,0x44,0x40,0x20},{0x3C,0x40,0x40,0x40,0x7C},
-    {0x1C,0x20,0x40,0x20,0x1C},{0x3C,0x40,0x30,0x40,0x3C},
-    {0x44,0x28,0x10,0x28,0x44},{0x0C,0x50,0x50,0x50,0x3C},
-    {0x44,0x64,0x54,0x4C,0x44},{0x00,0x08,0x36,0x41,0x00},
-    {0x00,0x00,0x7F,0x00,0x00},{0x00,0x41,0x36,0x08,0x00},
-    {0x10,0x08,0x08,0x10,0x08},
-};
-
-static void mz_char(int x, int y, char c)
-{
-    if (c < 0x20 || c > 0x7E) c = '?';
-    const uint8_t *g = mz_font[c - 0x20];
-    for (int col = 0; col < 5; col++) {
-        uint8_t b = g[col];
-        for (int row = 0; row < 8; row++)
-            if (b & (1 << row)) oled_draw_pixel(x + col, y + row);
-    }
-}
-static void mz_str(int x, int y, const char *s)
-{ while (*s) { mz_char(x, y, *s++); x += 6; } }
+static uint8_t rwall[MZ_ROWS][MZ_COLS];
+static uint8_t bwall[MZ_ROWS][MZ_COLS];
+static uint8_t vis[MZ_ROWS][MZ_COLS];
+static uint8_t fog[MZ_ROWS][MZ_COLS];
+static uint8_t coin[MZ_ROWS][MZ_COLS];
 
 /* ─── maze generation — iterative DFS (recursive backtracker) ────────────── */
-
-/*
- * Direction encoding:
- *   0 = right  (+col)
- *   1 = down   (+row)
- *   2 = left   (-col)
- *   3 = up     (-row)
- */
 static const int DR[4] = { 0,  1,  0, -1};
 static const int DC[4] = { 1,  0, -1,  0};
 
 static void maze_generate(void)
 {
-    /* DFS stack — local to avoid polluting file scope */
     #define STACK_MAX (MZ_COLS * MZ_ROWS)
     uint8_t gen_stack_r[STACK_MAX];
     uint8_t gen_stack_c[STACK_MAX];
 
-    /* Clear all arrays */
-    memset(rwall, 1, sizeof(rwall));   /* start with all walls present */
+    memset(rwall, 1, sizeof(rwall));
     memset(bwall, 1, sizeof(bwall));
     memset(vis,   0, sizeof(vis));
     memset(fog,   0, sizeof(fog));
     memset(coin,  0, sizeof(coin));
 
-    /* Remove outer boundary ambiguity — border walls are always solid */
-
-    /* Iterative DFS stack */
     int sp = 0;
     gen_stack_r[sp] = 0;
     gen_stack_c[sp] = 0;
@@ -175,7 +103,6 @@ static void maze_generate(void)
         int r = gen_stack_r[sp];
         int c = gen_stack_c[sp];
 
-        /* Shuffle directions using Fisher-Yates on 4 elements */
         int dirs[4] = {0, 1, 2, 3};
         for (int i = 3; i > 0; i--) {
             int j = (int)(esp_random() % (uint32_t)(i + 1));
@@ -190,11 +117,10 @@ static void maze_generate(void)
             if (nr < 0 || nr >= MZ_ROWS || nc < 0 || nc >= MZ_COLS) continue;
             if (vis[nr][nc]) continue;
 
-            /* Remove wall between (r,c) and (nr,nc) */
-            if (d == 0) rwall[r][c]  = 0;   /* remove right wall of (r,c)  */
-            if (d == 1) bwall[r][c]  = 0;   /* remove bottom wall of (r,c) */
-            if (d == 2) rwall[r][nc] = 0;   /* remove right wall of (r,nc) */
-            if (d == 3) bwall[nr][c] = 0;   /* remove bottom wall of (nr,c)*/
+            if (d == 0) rwall[r][c]  = 0;
+            if (d == 1) bwall[r][c]  = 0;
+            if (d == 2) rwall[r][nc] = 0;
+            if (d == 3) bwall[nr][c] = 0;
 
             vis[nr][nc] = 1;
             sp++;
@@ -204,32 +130,25 @@ static void maze_generate(void)
             break;
         }
 
-        if (!pushed) sp--;   /* backtrack */
+        if (!pushed) sp--;
     }
 
-    /*
-     * Place coins in dead-ends (cells with only one open passage).
-     * Dead-ends are natural rest points the player reaches — rewarding
-     * thorough exploration.
-     */
     for (int r = 0; r < MZ_ROWS; r++) {
         for (int c = 0; c < MZ_COLS; c++) {
-            /* Skip start and exit cells */
             if (r == 0 && c == 0) continue;
             if (r == MZ_ROWS-1 && c == MZ_COLS-1) continue;
 
             int open = 0;
-            if (c < MZ_COLS-1 && !rwall[r][c])   open++;  /* right open */
-            if (c > 0          && !rwall[r][c-1]) open++;  /* left open  */
-            if (r < MZ_ROWS-1  && !bwall[r][c])   open++;  /* down open  */
-            if (r > 0          && !bwall[r-1][c]) open++;  /* up open    */
+            if (c < MZ_COLS-1 && !rwall[r][c])   open++;
+            if (c > 0          && !rwall[r][c-1]) open++;
+            if (r < MZ_ROWS-1  && !bwall[r][c])   open++;
+            if (r > 0          && !bwall[r-1][c]) open++;
 
-            if (open == 1) coin[r][c] = 1;   /* dead-end — place coin */
+            if (open == 1) coin[r][c] = 1;
         }
     }
 }
 
-/* ─── fog of war update ──────────────────────────────────────────────────── */
 static void update_fog(int pr, int pc)
 {
     for (int r = 0; r < MZ_ROWS; r++) {
@@ -243,22 +162,19 @@ static void update_fog(int pr, int pc)
 
 /* ─── game state ─────────────────────────────────────────────────────────── */
 static struct {
-    int      pr, pc;        /* player row, col                               */
+    int      pr, pc;
     uint32_t score;
     int      level;
     int      time_bonus;
-    bool     game_over;     /* true when player exits the maze               */
+    bool     game_over;
 
-    /* Input debounce — only move one cell per joystick push */
     int      last_dx, last_dy;
 
     int64_t  last_tick_ms;
-    int64_t  last_second_ms;   /* for time bonus countdown                   */
+    int64_t  last_second_ms;
 } MZ;
 
 static inline int64_t mz_now(void) { return esp_timer_get_time() / 1000; }
-
-/* ─── public API ─────────────────────────────────────────────────────────── */
 
 void maze_init(void)
 {
@@ -275,7 +191,6 @@ void maze_input(int dx, int dy, bool btn)
 {
     (void)btn;
 
-    /* Only act on new joystick push (edge detection) */
     bool dx_new = (dx != 0 && MZ.last_dx == 0);
     bool dy_new = (dy != 0 && MZ.last_dy == 0);
     MZ.last_dx = dx;
@@ -285,16 +200,14 @@ void maze_input(int dx, int dy, bool btn)
 
     int nr = MZ.pr, nc = MZ.pc;
 
-    /* Determine attempted move direction */
     int move_dir = -1;
-    if      (dx_new && dx >  0) move_dir = 0;  /* right */
-    else if (dy_new && dy >  0) move_dir = 1;  /* down  */
-    else if (dx_new && dx <  0) move_dir = 2;  /* left  */
-    else if (dy_new && dy <  0) move_dir = 3;  /* up    */
+    if      (dx_new && dx >  0) move_dir = 0;
+    else if (dy_new && dy >  0) move_dir = 1;
+    else if (dx_new && dx <  0) move_dir = 2;
+    else if (dy_new && dy <  0) move_dir = 3;
 
     if (move_dir < 0) return;
 
-    /* Check wall */
     bool blocked = false;
     switch (move_dir) {
         case 0: if (nc >= MZ_COLS-1 || rwall[nr][nc])   blocked = true; else nc++; break;
@@ -304,9 +217,6 @@ void maze_input(int dx, int dy, bool btn)
     }
 
     if (blocked) {
-        /* Low short "bump" — confirms the input registered even though
-         * movement didn't happen, which matters a lot in a maze where
-         * walls are easy to misjudge visually under fog of war */
         sound_play(NOTE_C4, 30);
         return;
     }
@@ -315,14 +225,12 @@ void maze_input(int dx, int dy, bool btn)
     MZ.pc = nc;
     update_fog(nr, nc);
 
-    /* Collect coin */
     if (coin[nr][nc]) {
         coin[nr][nc] = 0;
         MZ.score += COIN_SCORE;
-        sound_play(NOTE_E5, 45);   /* bright pickup chirp */
+        sound_play(NOTE_E5, 45);
     }
 
-    /* Check exit */
     if (nr == MZ_ROWS - 1 && nc == MZ_COLS - 1) {
         MZ.score += EXIT_SCORE + (uint32_t)MZ.time_bonus;
         MZ.level++;
@@ -331,10 +239,6 @@ void maze_input(int dx, int dy, bool btn)
         MZ.pr = 0; MZ.pc = 0;
         update_fog(0, 0);
 
-        /* Level-complete fanfare — same "triumphant ascending run" pattern
-         * used for Breakout wave-clear and Invaders wave-clear, so players
-         * learn to associate this melody shape with "you cleared something"
-         * across the whole console rather than each game inventing its own */
         static const Note level_tune[] = {
             { NOTE_C5, 70 }, { NOTE_E5, 70 }, { NOTE_G5, 70 }, { NOTE_C6, 140 },
         };
@@ -348,7 +252,6 @@ bool maze_tick(uint32_t *score_out)
     if ((now - MZ.last_tick_ms) < TICK_MS) { *score_out = MZ.score; return true; }
     MZ.last_tick_ms = now;
 
-    /* Countdown time bonus every second */
     if ((now - MZ.last_second_ms) >= 1000) {
         MZ.last_second_ms = now;
         MZ.time_bonus -= TIME_BONUS_RATE;
@@ -356,98 +259,88 @@ bool maze_tick(uint32_t *score_out)
     }
 
     *score_out = MZ.score;
-    return true;   /* maze never ends — player keeps solving levels */
+    return true;
 }
 
 void maze_draw(void)
 {
-    /* HUD */
-    char buf[24];
-    snprintf(buf, sizeof(buf), "SCR:%lu LVL:%d BNS:%d",
-             (unsigned long)MZ.score, MZ.level, MZ.time_bonus);
-    mz_str(1, 1, buf);
-    for (int x = 0; x < 128; x++) oled_draw_pixel(x, 9);
+    tft_fill_rect(0, 0, TFT_WIDTH, TFT_HEIGHT, COL_BG);
 
     /*
-     * Draw maze cells.
-     * For each revealed cell draw:
-     *   - Interior (blank — already cleared by oled_clear)
-     *   - Right wall if rwall[r][c]
-     *   - Bottom wall if bwall[r][c]
-     * Border walls: top/left always drawn; bottom/right of grid = outer border.
-     *
-     * Unrevealed cells are drawn as solid filled squares (fog of war).
+     * HUD text fix: was "S:%lu L:%d B:%d" — cryptic single-letter
+     * abbreviations. First attempt at full words ("SCORE/LVL/BONUS")
+     * overflowed the 160px screen width at worst-case values (210px for
+     * "SCORE:4294967295 LVL:99 BONUS:200"). Settled on 3-letter
+     * abbreviations (SCR/LV/BNS) — still meaningfully clearer than single
+     * letters, and verified to fit comfortably within 160px even at
+     * generous value lengths (126px worst-case tested).
      */
-
-    /* Outer top border */
-    for (int c = 0; c < MZ_COLS; c++) {
-        int px = MZ_X_OFF + c * CELL_PX;
-        oled_draw_pixel(px, MZ_Y_OFF);
-    }
-    /* Outer left border */
-    for (int r = 0; r < MZ_ROWS; r++) {
-        int py = MZ_Y_OFF + r * CELL_PX;
-        oled_draw_pixel(MZ_X_OFF, py);
-    }
+    char buf[40];
+    snprintf(buf, sizeof(buf), "SCR:%lu LV:%d BNS:%d",
+             (unsigned long)MZ.score, MZ.level, MZ.time_bonus);
+    font_draw_str(2, 4, buf, COL_HUD_TEXT);
+    for (int x = 0; x < TFT_WIDTH; x++) tft_draw_pixel(x, 14, COL_HUD_LINE);
 
     for (int r = 0; r < MZ_ROWS; r++) {
         for (int c = 0; c < MZ_COLS; c++) {
             int px = MZ_X_OFF + c * CELL_PX;
             int py = MZ_Y_OFF + r * CELL_PX;
 
+            bool is_exit = (r == MZ_ROWS-1 && c == MZ_COLS-1);
+
             if (!fog[r][c]) {
-                /* Fog — fill cell solid */
-                for (int dy = 1; dy <= INNER_PX; dy++)
-                    for (int dx = 1; dx <= INNER_PX; dx++)
-                        oled_draw_pixel(px + dx, py + dy);
-                /* Also draw surrounding walls solidly */
+                /* Unrevealed — solid panel-color fill, the "fog" color.
+                 * A faint star is drawn in roughly 1-in-6 fog cells for
+                 * ambient texture, matching the reference image's
+                 * starfield motif — purely decorative, costs one extra
+                 * pixel write per qualifying cell. */
+                tft_fill_rect(px+1, py+1, INNER_PX, INNER_PX, COL_FOG);
+                if (((r * MZ_COLS + c) % 6) == 0) {
+                    tft_draw_pixel(px + CELL_PX/2, py + CELL_PX/2, PAL_OUTLINE);
+                }
                 if (rwall[r][c] || c == MZ_COLS-1)
                     for (int dy = 0; dy <= CELL_PX; dy++)
-                        oled_draw_pixel(px + CELL_PX, py + dy);
+                        tft_draw_pixel(px + CELL_PX, py + dy, COL_WALL);
                 if (bwall[r][c] || r == MZ_ROWS-1)
                     for (int dx = 0; dx <= CELL_PX; dx++)
-                        oled_draw_pixel(px + dx, py + CELL_PX);
+                        tft_draw_pixel(px + dx, py + CELL_PX, COL_WALL);
                 continue;
             }
 
-            /* Revealed cell — draw walls only */
-            /* Right wall */
+            /* Revealed — black interior (already cleared), draw walls */
             if (rwall[r][c] || c == MZ_COLS - 1) {
                 for (int dy = 0; dy <= CELL_PX; dy++)
-                    oled_draw_pixel(px + CELL_PX, py + dy);
+                    tft_draw_pixel(px + CELL_PX, py + dy, COL_WALL);
             }
-            /* Bottom wall */
             if (bwall[r][c] || r == MZ_ROWS - 1) {
                 for (int dx = 0; dx <= CELL_PX; dx++)
-                    oled_draw_pixel(px + dx, py + CELL_PX);
+                    tft_draw_pixel(px + dx, py + CELL_PX, COL_WALL);
             }
 
-            /* Coin — small dot in cell centre */
+            /* Exit cell glows with the palette's main blue once revealed */
+            if (is_exit) {
+                tft_fill_rect(px+1, py+1, INNER_PX, INNER_PX, COL_EXIT);
+            }
+
+            /*
+             * Coin — upgraded from a flat 3x3 gold square to a small
+             * pixel-art coin (filled circle with a bright highlight dot),
+             * matching the reference image's coin sprites rather than
+             * reading as an undifferentiated colored square.
+             */
             if (coin[r][c]) {
                 int cx = px + CELL_PX / 2;
                 int cy = py + CELL_PX / 2;
-                oled_draw_pixel(cx,   cy);
-                oled_draw_pixel(cx+1, cy);
-                oled_draw_pixel(cx,   cy+1);
-                oled_draw_pixel(cx+1, cy+1);
+                tft_fill_circle(cx, cy, 2, COL_COIN);
+                tft_draw_pixel(cx - 1, cy - 1, PAL_WHITE);  /* highlight glint */
             }
         }
     }
 
-    /* Exit marker — 'E' drawn at bottom-right cell */
+    /* Player — bright cyan square centred in cell */
     {
-        int ex = MZ_X_OFF + (MZ_COLS-1) * CELL_PX + 1;
-        int ey = MZ_Y_OFF + (MZ_ROWS-1) * CELL_PX + 1;
-        if (fog[MZ_ROWS-1][MZ_COLS-1])
-            mz_char(ex, ey, 'E');
-    }
-
-    /* Player — filled 3×3 square centred in cell */
-    {
-        int px = MZ_X_OFF + MZ.pc * CELL_PX + CELL_PX/2 - 1;
-        int py = MZ_Y_OFF + MZ.pr * CELL_PX + CELL_PX/2 - 1;
-        for (int dy = 0; dy < 3; dy++)
-            for (int dx = 0; dx < 3; dx++)
-                oled_draw_pixel(px + dx, py + dy);
+        int px = MZ_X_OFF + MZ.pc * CELL_PX + CELL_PX/2 - 2;
+        int py = MZ_Y_OFF + MZ.pr * CELL_PX + CELL_PX/2 - 2;
+        tft_fill_rect(px, py, 4, 4, COL_PLAYER);
     }
 }

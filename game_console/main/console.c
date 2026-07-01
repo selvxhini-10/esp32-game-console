@@ -1,13 +1,24 @@
 /*
- * CONSOLE — top-level game selector and dispatcher.
+ * CONSOLE — top-level game selector and dispatcher. 128x160 color version.
  *
- * Responsibilities:
- *   - Animated game-select carousel (scrolls through all registered games)
+ * Responsibilities (unchanged from the monochrome version):
+ *   - Animated game-select carousel
  *   - Per-game high score display (loaded from NVS on boot)
  *   - Countdown before launch
- *   - Pause menu (triggered by dedicated GPIO26 pushbutton, see pausebtn.c)
+ *   - Pause menu (triggered by dedicated GPIO26 pushbutton)
  *   - Game-over screen with RETRY / MAIN MENU selector
  *   - NVS high score save on every game-over
+ *
+ * WHAT CHANGED FOR THE TFT MIGRATION:
+ *   - Embedded font table replaced with the shared font.h/font.c module
+ *   - Every oled_draw_pixel/oled_clear/oled_update call replaced with the
+ *     equivalent tft_* call, now requiring a color argument
+ *   - All y-coordinates recalculated for 160px height instead of 64px —
+ *     this was a from-scratch layout pass, not a naive scale-up, since a
+ *     literal 2.5x stretch would leave huge dead space between elements
+ *   - Pause overlay can now use a REAL semi-dark tinted box instead of
+ *     the monochrome version's "skip drawing the game" workaround — see
+ *     draw_pause_overlay() for details
  *
  * Adding a new game — only change needed in this file:
  *   1. #include "my_game.h"
@@ -15,7 +26,10 @@
  */
 
 #include "console.h"
-#include "oled.h"
+#include "tft.h"
+#include "font.h"
+#include "palette.h"
+#include "effects.h"
 #include "nvs_scores.h"
 #include "sound.h"
 #include "snake.h"
@@ -29,84 +43,33 @@
 #include <stdio.h>
 
 /* ══════════════════════════════════════════════════════════════════════════
-   FONT
+   COLOR PALETTE
    ══════════════════════════════════════════════════════════════════════════ */
 
-static const uint8_t s_font[][5] = {
-    {0x00,0x00,0x00,0x00,0x00},{0x00,0x00,0x5F,0x00,0x00},
-    {0x00,0x07,0x00,0x07,0x00},{0x14,0x7F,0x14,0x7F,0x14},
-    {0x24,0x2A,0x7F,0x2A,0x12},{0x23,0x13,0x08,0x64,0x62},
-    {0x36,0x49,0x55,0x22,0x50},{0x00,0x05,0x03,0x00,0x00},
-    {0x00,0x1C,0x22,0x41,0x00},{0x00,0x41,0x22,0x1C,0x00},
-    {0x14,0x08,0x3E,0x08,0x14},{0x08,0x08,0x3E,0x08,0x08},
-    {0x00,0x50,0x30,0x00,0x00},{0x08,0x08,0x08,0x08,0x08},
-    {0x00,0x60,0x60,0x00,0x00},{0x20,0x10,0x08,0x04,0x02},
-    {0x3E,0x51,0x49,0x45,0x3E},{0x00,0x42,0x7F,0x40,0x00},
-    {0x42,0x61,0x51,0x49,0x46},{0x21,0x41,0x45,0x4B,0x31},
-    {0x18,0x14,0x12,0x7F,0x10},{0x27,0x45,0x45,0x45,0x39},
-    {0x3C,0x4A,0x49,0x49,0x30},{0x01,0x71,0x09,0x05,0x03},
-    {0x36,0x49,0x49,0x49,0x36},{0x06,0x49,0x49,0x29,0x1E},
-    {0x00,0x36,0x36,0x00,0x00},{0x00,0x56,0x36,0x00,0x00},
-    {0x08,0x14,0x22,0x41,0x00},{0x14,0x14,0x14,0x14,0x14},
-    {0x00,0x41,0x22,0x14,0x08},{0x02,0x01,0x51,0x09,0x06},
-    {0x32,0x49,0x79,0x41,0x3E},{0x7E,0x11,0x11,0x11,0x7E},
-    {0x7F,0x49,0x49,0x49,0x36},{0x3E,0x41,0x41,0x41,0x22},
-    {0x7F,0x41,0x41,0x22,0x1C},{0x7F,0x49,0x49,0x49,0x41},
-    {0x7F,0x09,0x09,0x09,0x01},{0x3E,0x41,0x49,0x49,0x7A},
-    {0x7F,0x08,0x08,0x08,0x7F},{0x00,0x41,0x7F,0x41,0x00},
-    {0x20,0x40,0x41,0x3F,0x01},{0x7F,0x08,0x14,0x22,0x41},
-    {0x7F,0x40,0x40,0x40,0x40},{0x7F,0x02,0x0C,0x02,0x7F},
-    {0x7F,0x04,0x08,0x10,0x7F},{0x3E,0x41,0x41,0x41,0x3E},
-    {0x7F,0x09,0x09,0x09,0x06},{0x3E,0x41,0x51,0x21,0x5E},
-    {0x7F,0x09,0x19,0x29,0x46},{0x46,0x49,0x49,0x49,0x31},
-    {0x01,0x01,0x7F,0x01,0x01},{0x3F,0x40,0x40,0x40,0x3F},
-    {0x1F,0x20,0x40,0x20,0x1F},{0x3F,0x40,0x38,0x40,0x3F},
-    {0x63,0x14,0x08,0x14,0x63},{0x07,0x08,0x70,0x08,0x07},
-    {0x61,0x51,0x49,0x45,0x43},{0x00,0x7F,0x41,0x41,0x00},
-    {0x02,0x04,0x08,0x10,0x20},{0x00,0x41,0x41,0x7F,0x00},
-    {0x04,0x02,0x01,0x02,0x04},{0x40,0x40,0x40,0x40,0x40},
-    {0x00,0x01,0x02,0x04,0x00},{0x20,0x54,0x54,0x54,0x78},
-    {0x7F,0x48,0x44,0x44,0x38},{0x38,0x44,0x44,0x44,0x20},
-    {0x38,0x44,0x44,0x48,0x7F},{0x38,0x54,0x54,0x54,0x18},
-    {0x08,0x7E,0x09,0x01,0x02},{0x0C,0x52,0x52,0x52,0x3E},
-    {0x7F,0x08,0x04,0x04,0x78},{0x00,0x44,0x7D,0x40,0x00},
-    {0x20,0x40,0x44,0x3D,0x00},{0x7F,0x10,0x28,0x44,0x00},
-    {0x00,0x41,0x7F,0x40,0x00},{0x7C,0x04,0x18,0x04,0x78},
-    {0x7C,0x08,0x04,0x04,0x78},{0x38,0x44,0x44,0x44,0x38},
-    {0x7C,0x14,0x14,0x14,0x08},{0x08,0x14,0x14,0x18,0x7C},
-    {0x7C,0x08,0x04,0x04,0x08},{0x48,0x54,0x54,0x54,0x20},
-    {0x04,0x3F,0x44,0x40,0x20},{0x3C,0x40,0x40,0x40,0x7C},
-    {0x1C,0x20,0x40,0x20,0x1C},{0x3C,0x40,0x30,0x40,0x3C},
-    {0x44,0x28,0x10,0x28,0x44},{0x0C,0x50,0x50,0x50,0x3C},
-    {0x44,0x64,0x54,0x4C,0x44},{0x00,0x08,0x36,0x41,0x00},
-    {0x00,0x00,0x7F,0x00,0x00},{0x00,0x41,0x36,0x08,0x00},
-    {0x10,0x08,0x08,0x10,0x08},
-};
-
-static void fchar(int x, int y, char c)
-{
-    if (c < 0x20 || c > 0x7E) c = '?';
-    const uint8_t *g = s_font[c - 0x20];
-    for (int col = 0; col < 5; col++) {
-        uint8_t b = g[col];
-        for (int row = 0; row < 8; row++)
-            if (b & (1 << row)) oled_draw_pixel(x + col, y + row);
-    }
-}
-
-static int fstr(int x, int y, const char *s)
-{
-    int cx = x;
-    while (*s) { fchar(cx, y, *s++); cx += 6; }
-    return cx - x;
-}
-
-static void fstr_c(int y, const char *s)    /* centred */
-{
-    int len = 0; for (const char *p = s; *p; p++) len++;
-    int x = (128 - len * 6) / 2; if (x < 0) x = 0;
-    fstr(x, y, s);
-}
+#define COL_BG          PAL_BACKGROUND
+#define COL_BORDER      PAL_BORDER
+#define COL_TITLE       PAL_TITLE
+#define COL_TEXT        PAL_TEXT
+#define COL_DIM_TEXT    PAL_TEXT_DIM
+#define COL_HILIGHT     PAL_SELECTED
+#define COL_LINE        PAL_BORDER
+#define COL_CURSOR      PAL_CURSOR
+#define COL_COUNTDOWN   PAL_GOLD
+#define COL_BEST        PAL_GOLD
+#define COL_GAMEOVER    PAL_DANGER
+#define COL_NEWBEST     PAL_GOLD
+/*
+ * Pause box now pulls from PAL_BG_PANEL — the palette's own dedicated
+ * panel color — instead of a one-off hardcoded gray. Independently
+ * verified (see conversation history) to give even stronger luminance
+ * contrast against white text than the previous fixed value, while
+ * additionally keeping the pause overlay visually consistent with every
+ * other panel/menu surface across the console now that they all share
+ * one palette.
+ */
+#define COL_PAUSE_BOX    PAL_PANEL_BG
+#define COL_PAUSE_BORDER PAL_BLUE_MAIN
+#define COL_PAUSE_TITLE  PAL_GOLD   /* gold still pops clearly against the dark panel */
 
 /* ══════════════════════════════════════════════════════════════════════════
    SNAKE WRAPPERS  (adapts SnakeGame to the GameDesc interface)
@@ -180,12 +143,12 @@ static const GameDesc s_games[] = {
    ══════════════════════════════════════════════════════════════════════════ */
 
 typedef enum {
-    CON_SELECTING,      /* scrolling game list            */
-    CON_COUNTDOWN,      /* 3-2-1 before launch            */
-    CON_PLAYING,        /* game running                   */
-    CON_PAUSED,         /* pause overlay                  */
-    CON_HELP,           /* per-game controls screen       */
-    CON_GAME_OVER,      /* score + RETRY / MENU selector  */
+    CON_SELECTING,
+    CON_COUNTDOWN,
+    CON_PLAYING,
+    CON_PAUSED,
+    CON_HELP,
+    CON_GAME_OVER,
 } ConState;
 
 typedef enum {
@@ -204,27 +167,21 @@ typedef enum {
 /* ── state variables ──────────────────────────────────────────────────────── */
 
 static ConState  s_state       = CON_SELECTING;
-static int       s_sel         = 0;            /* selected game index        */
-static uint32_t  s_hi[GAME_COUNT];            /* RAM high score cache       */
+static int       s_sel         = 0;
+static uint32_t  s_hi[GAME_COUNT];
 static uint32_t  s_last_score  = 0;
 static GoItem    s_go_sel      = GO_RETRY;
 static PauseItem s_pause_sel   = PAUSE_RESUME;
 static int       s_countdown   = 3;
-static int64_t   s_cd_tick     = 0;           /* ms timestamp per count     */
-/* NOTE: the old hold-to-pause timer state has been removed —
- * pausing is now triggered exclusively by console_pause_request(), called
- * from app_main when the dedicated GPIO26 pause button reports a press.   */
+static int64_t   s_cd_tick     = 0;
 
-/* blink */
 static bool    s_blink      = true;
 static int64_t s_blink_tick = 0;
 
-/* input debounce */
 static int  s_last_dy  = 0;
-static bool s_last_menu_btn = false;   /* joystick click only — menu navigation */
+static bool s_last_menu_btn = false;
 
-/* NVS keys per game (must be ≤15 chars each) */
-static const char *s_nvs_keys[GAME_COUNT];   /* filled in console_init */
+static const char *s_nvs_keys[GAME_COUNT];
 
 static inline int64_t con_now(void) { return esp_timer_get_time() / 1000; }
 
@@ -232,102 +189,138 @@ static inline int64_t con_now(void) { return esp_timer_get_time() / 1000; }
    DRAW HELPERS
    ══════════════════════════════════════════════════════════════════════════ */
 
-static void draw_hline(int y)
-{
-    for (int x = 0; x < 128; x++) oled_draw_pixel(x, y);
-}
-
 static void draw_border(void)
 {
-    draw_hline(0); draw_hline(63);
-    for (int y = 0; y < 64; y++) { oled_draw_pixel(0,y); oled_draw_pixel(127,y); }
+    tft_draw_rect(0, 0, TFT_WIDTH, TFT_HEIGHT, COL_BORDER);
 }
 
 /*
- * Centred two-item vertical selector used by both game-over and pause screens.
+ * Centred vertical selector used by pause/help/game-over screens.
  * items[]   — label strings
  * count     — number of items
  * sel       — currently highlighted index
  * y_start   — y pixel of first item
  * row_h     — pixels per row
  */
+/*
+ * Selector redesign for clarity (reported as "not user friendly" — see
+ * the pause menu screenshot where RESUME/HELP/QUIT all looked like
+ * similar pale cyan text with no clear indication of which was selected).
+ *
+ * Previous version only changed TEXT COLOR for the selected item
+ * (COL_TEXT white vs COL_HILIGHT bright cyan) — both are light colors on
+ * a dark background, so the contrast between "selected" and "not
+ * selected" was far weaker than the contrast between either of them and
+ * the background. A person glancing at the screen sees "all the text is
+ * roughly similarly bright" rather than "one item clearly stands out."
+ *
+ * Fixed by adding an actual highlight BAR behind the selected item (a
+ * filled rectangle in the palette's main blue) in addition to the
+ * brighter text color — now selection is communicated by a background
+ * shape change, not just a text-color shift, which reads unambiguously
+ * even at a glance.
+ */
 static void draw_selector(const char **items, int count, int sel,
                            int y_start, int row_h)
 {
-    /* Measure widest label so block is stable when cursor toggles */
     int max_len = 0;
     for (int i = 0; i < count; i++) {
         int l = 0; for (const char *p = items[i]; *p; p++) l++;
         if (l > max_len) max_len = l;
     }
-    /* Total block: "> " (2 chars) + widest label */
     int block_w = (2 + max_len) * 6;
-    int block_x = (128 - block_w) / 2;
+    int block_x = (TFT_WIDTH - block_w) / 2;
     if (block_x < 0) block_x = 0;
     int label_x = block_x + 12;
 
     for (int i = 0; i < count; i++) {
         int y = y_start + i * row_h;
-        if (i == sel && s_blink) fchar(block_x, y, '>');
-        fstr(label_x, y, items[i]);
+        bool is_sel = (i == sel);
+
+        if (is_sel) {
+            /* Highlight bar behind the selected row — main palette blue,
+             * filling almost the full row height for a clear "selected"
+             * block rather than relying on text color alone. */
+            tft_fill_rect(block_x - 2, y - 2, block_w + 4, row_h - 2, PAL_BLUE_MAIN);
+            font_draw_str(label_x, y, items[i], PAL_WHITE);
+        } else {
+            font_draw_str(label_x, y, items[i], COL_DIM_TEXT);
+        }
+
+        if (is_sel && s_blink) font_draw_char(block_x - 10, y, '>', PAL_BLUE_BRIGHT);
     }
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
    SCREEN: GAME SELECT CAROUSEL
-   Visible window: 3 items.  Selected item is in the middle row with a
-   solid inverted-look bracket: "[SNAKE]" drawn with pixel brackets.
-   Items above/below are shown dimly (just text, no decoration).
-   ────────────────────────────────────────────────────────────────────────── */
+   ────────────────────────────────────────────────────────────────────────── *
+ * LAYOUT REDESIGNED FOR 160px HEIGHT (was 64px):
+ *   y=  4   "SELECT GAME" header
+ *   y= 16   separator
+ *   y= 30   previous game (dim)
+ *   y= 64   [ CURRENT GAME ] — large, highlighted, with bracket decoration
+ *   y= 98   next game (dim)
+ *   y=128   separator
+ *
+ * LAYOUT REDESIGNED FOR LANDSCAPE 160x128 (was portrait 128x160):
+ *   y=  3   "SELECT GAME" header
+ *   y= 14   separator
+ *   y= 24   previous game (dim)
+ *   y= 50   [ CURRENT GAME ] — large, highlighted
+ *   y= 78   next game (dim)
+ *   y= 96   separator
+ *   y=102   "BEST: nnnn"
+ *   y=116   "PRESS TO START"
+ * ────────────────────────────────────────────────────────────────────────── */
 static void draw_select_screen(void)
 {
     draw_border();
 
-    /* Header */
-    fstr_c(3, "SELECT GAME");
-    draw_hline(12);
+    font_draw_str_centred(3, "SELECT GAME", COL_TITLE, TFT_WIDTH);
+    for (int x = 1; x < TFT_WIDTH-1; x++) tft_draw_pixel(x, 14, COL_LINE);
 
-    /*
-     * Carousel rows centred in the 50px between y=13 and y=63.
-     * Row layout:
-     *   prev (y=15): dim, small indent
-     *   curr (y=27): highlighted with bracket decoration
-     *   next (y=39): dim
-     * High score sits at y=52.
-     */
     int prev_i = (s_sel - 1 + GAME_COUNT) % GAME_COUNT;
     int next_i = (s_sel + 1)              % GAME_COUNT;
 
-    /* Previous (greyed — just name, centred) */
-    fstr_c(15, s_games[prev_i].name);
+    font_draw_str_centred(24, s_games[prev_i].name, COL_DIM_TEXT, TFT_WIDTH);
 
-    /* Current — draw [ NAME ] brackets */
+    /*
+     * Current — large 2x text with bracket decoration.
+     *
+     * BUG FIX: the width calculation previously assumed "[ " and " ]"
+     * (4 characters total, including spaces) but only "[" and "]" (2
+     * characters, no spaces) were ever actually drawn — name_w + 4*11
+     * overestimated the total width by 2*11=22px, which shifted the
+     * whole bracketed block 11px left of true centre every time. Fixed
+     * by using the ACTUAL character count drawn: name_w + 2*11.
+     */
     {
-        const char *name  = s_games[s_sel].name;
+        const char *name = s_games[s_sel].name;
         int len = 0; for (const char *p = name; *p; p++) len++;
-        int name_w  = len * 6;
-        int total_w = name_w + 4 * 6;   /* "[ " + " ]" = 4 chars */
-        int bx      = (128 - total_w) / 2;
-        fstr(bx,          27, "[ ");
-        fstr(bx + 2*6,    27, name);
-        fstr(bx + 2*6 + name_w, 27, " ]");
+        int name_w  = len * 11;          /* 2x font: 11px per char        */
+        int total_w = name_w + 2 * 11;   /* "[" + name + "]" — 2 brackets */
+        int bx      = (TFT_WIDTH - total_w) / 2;
+        if (bx < 0) bx = 0;
+        font_draw_str_2x(bx,             50, "[", COL_HILIGHT);
+        font_draw_str_2x(bx + 11,        50, name, COL_HILIGHT);
+        font_draw_str_2x(bx + 11 + name_w, 50, "]", COL_HILIGHT);
     }
 
-    /* Next */
-    fstr_c(39, s_games[next_i].name);
+    font_draw_str_centred(78, s_games[next_i].name, COL_DIM_TEXT, TFT_WIDTH);
 
-    /* Scroll hint arrows */
     if (s_blink) {
-        fchar(60, 14, '^');
-        fchar(60, 48, 'v');
+        font_draw_char(76, 16, '^', COL_TITLE);
+        font_draw_char(76, 88, 'v', COL_TITLE);
     }
 
-    /* Separator + high score */
-    draw_hline(51);
-    {
-        char buf[24];
-        snprintf(buf, sizeof(buf), "BEST: %lu", (unsigned long)s_hi[s_sel]);
-        fstr_c(54, buf);
+    for (int x = 1; x < TFT_WIDTH-1; x++) tft_draw_pixel(x, 96, COL_LINE);
+
+    char buf[24];
+    snprintf(buf, sizeof(buf), "BEST: %lu", (unsigned long)s_hi[s_sel]);
+    font_draw_str_centred(102, buf, COL_BEST, TFT_WIDTH);
+
+    if (s_blink) {
+        font_draw_str_centred(116, "PRESS TO START", COL_TEXT, TFT_WIDTH);
     }
 }
 
@@ -337,113 +330,185 @@ static void draw_select_screen(void)
 static void draw_countdown(void)
 {
     draw_border();
-    fstr_c(10, "GET READY");
-    draw_hline(20);
+    font_draw_str_centred(20, "GET READY", COL_TITLE, TFT_WIDTH);
+    for (int x = 1; x < TFT_WIDTH-1; x++) tft_draw_pixel(x, 34, COL_LINE);
 
     char buf[4];
     snprintf(buf, sizeof(buf), "%d", s_countdown);
-    /* Draw large — 2× scale the single digit */
-    int cx = (128 - 11) / 2;   /* 11px = one 2× char */
-    char c = buf[0];
-    if (c < 0x20 || c > 0x7E) c = '?';
-    const uint8_t *g = s_font[c - 0x20];
-    for (int col = 0; col < 5; col++) {
-        uint8_t b = g[col];
-        for (int row = 0; row < 8; row++) {
-            if (b & (1 << row)) {
-                oled_draw_pixel(cx + col*2,     28 + row*2);
-                oled_draw_pixel(cx + col*2 + 1, 28 + row*2);
-                oled_draw_pixel(cx + col*2,     28 + row*2 + 1);
-                oled_draw_pixel(cx + col*2 + 1, 28 + row*2 + 1);
-            }
-        }
-    }
-    fstr_c(55, s_games[s_sel].name);
+    /* Large 2x digit, centred */
+    font_draw_str_2x_centred(60, buf, COL_COUNTDOWN, TFT_WIDTH);
+
+    font_draw_str_centred(130, s_games[s_sel].name, COL_TEXT, TFT_WIDTH);
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
-   SCREEN: PAUSE OVERLAY (drawn on top of frozen game frame)
-   ────────────────────────────────────────────────────────────────────────── */
+   SCREEN: PAUSE OVERLAY
+   ────────────────────────────────────────────────────────────────────────── *
+ * COLOR UPGRADE FROM MONOCHROME:
+ *
+ * The 1-bit version had to SKIP drawing the underlying game entirely
+ * while paused (a workaround documented in the previous version's
+ * comments — Maze's fog-of-war fill made an outline-only box unreadable
+ * since there's no way to "darken" a region on a 1-bit display).
+ *
+ * On color, we can do this properly: draw the frozen game frame, THEN
+ * overlay a solid dark box on top (COL_PAUSE_BOX, a dark navy/gray that
+ * reads as "dimmed" against any background) with a bright cyan border.
+ * This is the real "semi-transparent overlay" look pause menus normally
+ * have — genuinely impossible before, straightforward now.
+ * ────────────────────────────────────────────────────────────────────────── */
 static void draw_pause_overlay(void)
 {
-    /*
-     * 1-bit display note: there's no "darken" operation — a pixel is either
-     * on or off. So the overlay is a simple outlined box with text inside;
-     * the box border alone is enough to visually separate it from the game
-     * frame still drawn underneath.
-     */
-    for (int x = 24; x <= 103; x++) {
-        oled_draw_pixel(x, 16); oled_draw_pixel(x, 56);
-    }
-    for (int y = 16; y <= 56; y++) {
-        oled_draw_pixel(24, y); oled_draw_pixel(103, y);
-    }
+    /* Draw the frozen game frame underneath first */
+    s_games[s_sel].draw();
 
-    fstr_c(20, "-- PAUSED --");
+    /*
+     * Dark box overlay, centred on the new 160x128 landscape screen.
+     * Previous coordinates (bx0=14,by0=40,bx1=113,by1=120) were sized
+     * for the old 128x160 PORTRAIT screen — by1=120 left almost no
+     * margin against the new 128px height, and the box wasn't centred
+     * for the new 160px width either. Recalculated from scratch:
+     */
+    int box_w = 130, box_h = 80;
+    int bx0 = (TFT_WIDTH  - box_w) / 2;
+    int by0 = (TFT_HEIGHT - box_h) / 2;
+    int bx1 = bx0 + box_w;
+    int by1 = by0 + box_h;
+
+    tft_fill_rect(bx0, by0, box_w, box_h, COL_PAUSE_BOX);
+    tft_draw_rect(bx0, by0, box_w, box_h, COL_PAUSE_BORDER);
+
+    /*
+     * Text centring fixed to use the BOX width, not the full screen
+     * width — font_draw_str_centred(y, text, color, width) centres
+     * within [0, width), so passing TFT_WIDTH (the whole screen) while
+     * the box itself is only 130px wide and offset from x=0 produced
+     * text that was centred on the wrong reference frame. The cleanest
+     * fix without changing font_draw_str_centred's signature is to
+     * temporarily treat the box's own width as the centring reference
+     * and offset the result by bx0.
+     */
+    {
+        const char *title = "-- PAUSED --";
+        int len = 0; for (const char *p = title; *p; p++) len++;
+        int tw = len * 6;
+        int tx = bx0 + (box_w - tw) / 2;
+        font_draw_str(tx, by0 + 8, title, COL_PAUSE_TITLE);
+    }
 
     const char *p_items[] = { "RESUME", "HELP", "QUIT" };
-    draw_selector(p_items, PAUSE_ITEM_COUNT, (int)s_pause_sel, 30, 9);
+    draw_selector(p_items, PAUSE_ITEM_COUNT, (int)s_pause_sel, by0 + 26, 16);
+
+    (void)bx1; (void)by1;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
-   SCREEN: HELP  (per-game controls, shown from the pause menu)
+   SCREEN: HELP
    ────────────────────────────────────────────────────────────────────────── */
+/*
+ * Layout fix: the bottom divider (was y=138) and "BTN: BACK" hint (was
+ * y=146) were both being drawn BEYOND TFT_HEIGHT(128) — leftover from
+ * the old 160px-tall portrait layout, never updated after the landscape
+ * rotation. tft_draw_pixel()'s bounds check silently dropped every pixel
+ * of both, so this footer has been invisible since the rotation fix.
+ * Repositioned to fit inside the actual 128px height, with help lines
+ * given a touch more breathing room (18px instead of 16px) since there's
+ * now a clearly-bounded footer area to leave room for.
+ *
+ * Hint text also clarified from "BTN: BACK" to "JOYSTICK BTN: BACK" —
+ * the console now has three distinct physical buttons (joystick click,
+ * GPIO26 pause, GPIO27 action), so a bare "BTN" no longer unambiguously
+ * identifies which one returns from this screen.
+ */
+/*
+ * Help screen redesigned with an actual dark panel box around the
+ * content (matching the pause overlay's now-established pattern)
+ * instead of help text floating directly on the bare background with
+ * no visual structure.
+ */
 static void draw_help_screen(void)
 {
     draw_border();
 
-    fstr_c(3, s_games[s_sel].name);
-    draw_hline(12);
+    font_draw_str_centred(4, s_games[s_sel].name, COL_TITLE, TFT_WIDTH);
+    for (int x = 1; x < TFT_WIDTH-1; x++) tft_draw_pixel(x, 18, COL_LINE);
 
-    /* Up to 4 lines of help text, centred, starting at y=17 */
-    int y = 17;
+    /* Dark panel box for the help text itself */
+    int bx0 = 10, by0 = 24, box_w = TFT_WIDTH - 20, box_h = 80;
+    tft_fill_rect(bx0, by0, box_w, box_h, PAL_PANEL_BG);
+    tft_draw_rect(bx0, by0, box_w, box_h, PAL_BLUE_MAIN);
+
+    int y = by0 + 8;
     for (int i = 0; i < 4 && s_games[s_sel].help[i] != NULL; i++) {
-        fstr_c(y, s_games[s_sel].help[i]);
-        y += 10;
+        font_draw_str_centred(y, s_games[s_sel].help[i], PAL_WHITE, TFT_WIDTH);
+        y += 18;
     }
 
-    draw_hline(53);
-    if (s_blink) fstr_c(56, "BTN: BACK");
+    for (int x = 1; x < TFT_WIDTH-1; x++) tft_draw_pixel(x, 110, COL_LINE);
+    if (s_blink) font_draw_str_centred(116, "JOYSTICK BTN: BACK", COL_DIM_TEXT, TFT_WIDTH);
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
    SCREEN: GAME OVER
    ────────────────────────────────────────────────────────────────────────── */
+/*
+ * Layout redesigned for the landscape 128px height (TFT_HEIGHT).
+ *
+ * Previous y-coordinates (10, 32, 42, 58, 78, 96) were tuned for the
+ * earlier 160px-tall portrait screen and never updated after the
+ * landscape rotation. Two visible problems resulted:
+ *   1. An 18px dead gap between the second divider (y=78) and the first
+ *      selector item (y=96) — the "white space after the divider".
+ *   2. The selector's last row landed only 3px above the bottom border —
+ *      "cutting too close to the bottom".
+ *
+ * Redesigned from scratch for 128px height: every element is placed
+ * immediately after the one before it with a small intentional gap
+ * (6px after dividers, matching the spacing used elsewhere), and the
+ * selector block now ends with a comfortable ~39px margin from the
+ * bottom border instead of 3px.
+ */
+/*
+ * Redesigned to use the full 128px screen height instead of ending
+ * around y=94 with ~26px of unused space below. Changes:
+ *   - Score and best/new-best now both shown (previously only one or
+ *     the other, depending on whether this run beat the record)
+ *   - Selector items now sit inside a dark panel box matching the help
+ *     screen's and pause overlay's visual language, rather than floating
+ *     on the bare background
+ *   - Ambient twinkling stars drawn behind everything for visual
+ *     consistency with the main menu, instead of a flat empty background
+ */
 static void draw_game_over(void)
 {
-    /*
-     * Fixed layout — every element has a guaranteed pixel slot so
-     * MAIN MENU always lands within the 64px display height.
-     *
-     * y= 2   "GAME OVER" title
-     * y=11   separator
-     * y=14   SCORE: xxxx
-     * y=24   "NEW BEST!" OR "BEST: xxxx"  (one line — mutually exclusive)
-     * y=34   separator
-     * y=38   > RETRY         (row 0)
-     * y=52   > MAIN MENU     (row 1, row_h=14 → bottom pixel at y=59, inside border)
-     */
+    effects_stars_draw();
     draw_border();
 
-    fstr_c(2, "GAME OVER");
-    draw_hline(11);
+    font_draw_str_2x_centred(4, "GAME OVER", COL_GAMEOVER, TFT_WIDTH);
+    for (int x = 1; x < TFT_WIDTH-1; x++) tft_draw_pixel(x, 24, COL_LINE);
 
     char buf[24];
-    snprintf(buf, sizeof(buf), "SCORE:%lu", (unsigned long)s_last_score);
-    fstr_c(14, buf);
+    snprintf(buf, sizeof(buf), "SCORE: %lu", (unsigned long)s_last_score);
+    font_draw_str_centred(30, buf, COL_TEXT, TFT_WIDTH);
 
-    /* One info line only — new best takes priority over showing stored best */
-    if (s_last_score > 0 && s_last_score >= s_hi[s_sel]) {
-        fstr_c(24, "NEW BEST!");
+    bool new_best = (s_last_score > 0 && s_last_score >= s_hi[s_sel]);
+    if (new_best) {
+        font_draw_str_centred(42, "** NEW BEST **", COL_NEWBEST, TFT_WIDTH);
     } else {
-        snprintf(buf, sizeof(buf), "BEST:%lu", (unsigned long)s_hi[s_sel]);
-        fstr_c(24, buf);
+        snprintf(buf, sizeof(buf), "BEST: %lu", (unsigned long)s_hi[s_sel]);
+        font_draw_str_centred(42, buf, COL_BEST, TFT_WIDTH);
     }
 
-    draw_hline(34);
+    for (int x = 1; x < TFT_WIDTH-1; x++) tft_draw_pixel(x, 56, COL_LINE);
+
+    /* Selector panel — fills the remaining vertical space down to a
+     * comfortable margin above the bottom border */
+    int panel_y = 62, panel_h = 56;
+    tft_fill_rect(8, panel_y, TFT_WIDTH - 16, panel_h, PAL_PANEL_BG);
+    tft_draw_rect(8, panel_y, TFT_WIDTH - 16, panel_h, PAL_BLUE_MAIN);
 
     const char *go_items[] = { "RETRY", "MAIN MENU" };
-    draw_selector(go_items, GO_ITEM_COUNT, (int)s_go_sel, 38, 14);
+    draw_selector(go_items, GO_ITEM_COUNT, (int)s_go_sel, panel_y + 10, 18);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -452,7 +517,6 @@ static void draw_game_over(void)
 
 void console_init(void)
 {
-    /* NVS keys — must be ≤15 chars, unique */
     static const char *keys[GAME_COUNT];
     keys[0] = "hi_snake";
     keys[1] = "hi_pong";
@@ -465,84 +529,60 @@ void console_init(void)
         s_hi[i]       = nvs_scores_get(keys[i]);
     }
 
-    s_state       = CON_SELECTING;   /* always start at game selector, never countdown */
+    s_state       = CON_SELECTING;
     s_sel         = 0;
     s_last_score  = 0;
     s_go_sel      = GO_RETRY;
     s_pause_sel   = PAUSE_RESUME;
     s_countdown   = 3;
-    s_cd_tick     = con_now();        /* FIX: init to NOW so (now-s_cd_tick) starts at 0 */
+    s_cd_tick     = con_now();
     s_blink       = true;
     s_blink_tick  = con_now();
     s_last_dy     = 0;
-    s_last_menu_btn = true;   /* treat as 'already held' so first poll can't fire a spurious press */
+
+    /* Ambient twinkling starfield for menu screens — purely decorative,
+     * matches the reference image's starry background motif. */
+    effects_stars_init(TFT_WIDTH, TFT_HEIGHT);
+    s_last_menu_btn = true;
 }
 
 void console_input(int dx, int dy, bool menu_btn, bool action_btn)
 {
     int64_t now = con_now();
 
-    /* Blink */
     if ((now - s_blink_tick) >= 500) {
         s_blink      = !s_blink;
         s_blink_tick = now;
     }
 
-    /*
-     * Edge detection for the MENU button (joystick click) only.
-     * The action button (GPIO27) is forwarded to games as a raw level —
-     * each game's own input() function decides whether it wants edge
-     * detection (e.g. Flappy fires on press, not hold) or a held-state
-     * read, exactly like joystick axis handling elsewhere in this project.
-     */
     bool menu_btn_pressed = (menu_btn && !s_last_menu_btn);
     bool dy_new           = (dy != 0 && s_last_dy == 0);
     s_last_dy  = dy;
-
-    /*
-     * NOTE: pausing used to be triggered here by holding the joystick
-     * button for 1 second during CON_PLAYING. That logic has been removed
-     * entirely — pause is now triggered exclusively by console_pause_request(),
-     * called from app_main when the dedicated GPIO26 pushbutton fires.
-     *
-     * Button responsibilities are now fully separated:
-     *   - menu_btn   (joystick click) → menu navigation ONLY, never gameplay
-     *   - action_btn (GPIO27)         → in-game action ONLY, never menus
-     *   - pause request (GPIO26)      → handled entirely via console_pause_request()
-     */
 
     s_last_menu_btn = menu_btn;
 
     switch (s_state) {
 
-    /* ── SELECTING ── */
     case CON_SELECTING:
         if (dy_new) {
             s_sel = (s_sel + dy + GAME_COUNT) % GAME_COUNT;
-            sound_play(NOTE_C4, 25);   /* short neutral tick on scroll */
+            sound_play(NOTE_C4, 25);
         }
         if (menu_btn_pressed) {
             s_countdown = 3;
             s_cd_tick   = now;
             s_state     = CON_COUNTDOWN;
-            sound_play(NOTE_G4, 60);   /* confirm chirp on game selection */
+            sound_play(NOTE_G4, 60);
         }
         break;
 
-    /* ── COUNTDOWN ── */
     case CON_COUNTDOWN:
-        /* No input during countdown */
         break;
 
-    /* ── PLAYING ── */
     case CON_PLAYING:
-        /* action_btn (GPIO27) is the ONLY button forwarded to gameplay.
-         * Joystick click (menu_btn) is intentionally NOT passed through —
-         * it has no effect during gameplay at all. */
         s_games[s_sel].input(dx, dy, action_btn);
         break;
 
-    /* ── PAUSED ── */
     case CON_PAUSED:
         if (dy_new) {
             int n = ((int)s_pause_sel + dy + PAUSE_ITEM_COUNT) % PAUSE_ITEM_COUNT;
@@ -552,31 +592,24 @@ void console_input(int dx, int dy, bool menu_btn, bool action_btn)
         if (menu_btn_pressed) {
             if (s_pause_sel == PAUSE_RESUME) {
                 s_state = CON_PLAYING;
-                sound_play(NOTE_E4, 60);   /* resume cue — neutral, mid pitch */
+                sound_play(NOTE_E4, 60);
             } else if (s_pause_sel == PAUSE_HELP) {
                 s_state = CON_HELP;
                 sound_play(NOTE_G4, 50);
             } else {
-                /* QUIT — return to selector. This is the only way to exit
-                 * Maze (or any other infinite-progression game) since it
-                 * has no natural game-over condition.                    */
                 s_state = CON_SELECTING;
-                sound_play(NOTE_C4, 80);   /* lower pitch — "leaving" cue */
+                sound_play(NOTE_C4, 80);
             }
         }
         break;
 
-    /* ── HELP ── */
     case CON_HELP:
-        /* Any button press returns to the pause menu (not straight to play —
-         * the player may want to QUIT after reading controls, not just resume) */
         if (menu_btn_pressed) {
             s_state = CON_PAUSED;
             sound_play(NOTE_C4, 40);
         }
         break;
 
-    /* ── GAME OVER ── */
     case CON_GAME_OVER:
         if (dy_new) {
             int n = ((int)s_go_sel + dy + GO_ITEM_COUNT) % GO_ITEM_COUNT;
@@ -600,14 +633,8 @@ void console_input(int dx, int dy, bool menu_btn, bool action_btn)
 
 void console_pause_request(void)
 {
-    /*
-     * Called from app_main exactly once per debounced GPIO26 press
-     * (see pausebtn_pressed()). Only does anything while a game is
-     * actively running — pressing the pause button on the menu, during
-     * a countdown, or while already paused has no effect.
-     */
     if (s_state == CON_PLAYING) {
-        sound_play(NOTE_E4, 50);   /* distinct "pause" cue, separate from menu sounds */
+        sound_play(NOTE_E4, 50);
         s_state     = CON_PAUSED;
         s_pause_sel = PAUSE_RESUME;
     }
@@ -616,16 +643,15 @@ void console_pause_request(void)
 void console_tick(void)
 {
     int64_t now = con_now();
-    oled_clear();
 
     switch (s_state) {
 
-    /* ── SELECTING ── */
     case CON_SELECTING:
+        tft_fill_rect(0, 0, TFT_WIDTH, TFT_HEIGHT, COL_BG);
+        effects_stars_draw();   /* ambient starfield, drawn behind menu content */
         draw_select_screen();
         break;
 
-    /* ── COUNTDOWN ── */
     case CON_COUNTDOWN:
         if ((now - s_cd_tick) >= 1000) {
             s_countdown--;
@@ -634,20 +660,16 @@ void console_tick(void)
             if (s_countdown <= 0) {
                 s_games[s_sel].init();
                 s_state = CON_PLAYING;
-                /* Rising two-note "go!" launch cue */
                 static const Note launch_tune[] = { { NOTE_C5, 60 }, { NOTE_E5, 90 } };
                 sound_play_melody(launch_tune, sizeof(launch_tune)/sizeof(launch_tune[0]));
                 break;
             }
-
-            /* Tick on each "3", "2", "1" — same pitch each time keeps it
-             * neutral/rhythmic rather than melodic, like a real countdown */
             sound_play(NOTE_A4, 50);
         }
+        tft_fill_rect(0, 0, TFT_WIDTH, TFT_HEIGHT, COL_BG);
         draw_countdown();
         break;
 
-    /* ── PLAYING ── */
     case CON_PLAYING: {
         uint32_t sc   = 0;
         bool     alive = s_games[s_sel].tick(&sc);
@@ -656,17 +678,11 @@ void console_tick(void)
             s_last_score = sc;
             bool new_best = (sc > s_hi[s_sel]);
 
-            /* Update high score in RAM + NVS */
             if (new_best) {
                 s_hi[s_sel] = sc;
                 nvs_scores_set(s_nvs_keys[s_sel], sc);
             }
 
-            /*
-             * Two distinct outcomes get two distinct melodies — a player
-             * should be able to tell "new high score!" from "game over"
-             * by ear alone, without even looking at the screen.
-             */
             if (new_best && sc > 0) {
                 static const Note hiscore_tune[] = {
                     { NOTE_C5, 80 }, { NOTE_E5, 80 }, { NOTE_G5, 80 }, { NOTE_C6, 150 },
@@ -685,36 +701,26 @@ void console_tick(void)
         break;
     }
 
-    /* ── PAUSED ── */
     case CON_PAUSED:
         /*
-         * FIX: do NOT draw the underlying game while paused.
-         *
-         * The previous version drew the live game frame first (s_games[s_sel].draw())
-         * then overlaid the pause box on top. This looked fine for Snake/Pong/Breakout
-         * since their play areas are mostly empty space, but Maze's fog-of-war fill
-         * paints large solid white blocks across ~70% of the screen — exactly where
-         * the pause box sits. On a 1-bit display there's no way to "darken" a region,
-         * so the box outline and selector text became unreadable against that fill.
-         *
-         * The reliable fix: oled_clear() was already called at the top of console_tick(),
-         * so simply skip the game draw call entirely. The screen starts blank and ONLY
-         * the pause box is drawn — guaranteed clean background regardless of which
-         * game is paused or what was on screen at the moment of pausing.
+         * No longer needs to skip the game draw — draw_pause_overlay()
+         * draws the frozen frame itself, then overlays a real dark box
+         * on top (see the function's own comment for why this is now
+         * possible on color where it wasn't on the 1-bit display).
          */
         draw_pause_overlay();
         break;
 
-    /* ── HELP ── */
     case CON_HELP:
+        tft_fill_rect(0, 0, TFT_WIDTH, TFT_HEIGHT, COL_BG);
         draw_help_screen();
         break;
 
-    /* ── GAME OVER ── */
     case CON_GAME_OVER:
+        tft_fill_rect(0, 0, TFT_WIDTH, TFT_HEIGHT, COL_BG);
         draw_game_over();
         break;
     }
 
-    oled_update();
+    tft_update();
 }

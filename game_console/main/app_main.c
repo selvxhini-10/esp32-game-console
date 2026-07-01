@@ -3,7 +3,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_task_wdt.h"
-#include "oled.h"
+#include "tft.h"
 #include "joystick.h"
 #include "nvs_scores.h"
 #include "splash.h"
@@ -15,6 +15,54 @@
 static const char *TAG = "main";
 
 static inline int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
+
+/*
+ * ── WATCHDOG-FEEDER TASK ────────────────────────────────────────────────
+ *
+ * Why this exists: adc_oneshot_read() has NO timeout parameter and blocks
+ * internally polling a hardware "conversion done" flag. If that flag
+ * never sets — which can happen from a momentary power-rail brownout,
+ * electrical noise, or (less commonly) a genuine ADC peripheral fault —
+ * the call simply never returns. Every esp_task_wdt_reset() call placed
+ * AFTER joystick_read() in the main loop becomes unreachable in that
+ * scenario, which is exactly the crash you're seeing: main never gets
+ * back to its own reset call, so the watchdog has no choice but to fire.
+ *
+ * No amount of code restructuring inside app_main's own loop can fix
+ * this, because the problem is a single library call that doesn't
+ * return — there's no point in the call's body to inject a timeout from
+ * outside. The only real mitigation is a SEPARATE, independently-
+ * scheduled task whose only job is to keep feeding the watchdog on a
+ * fixed schedule, regardless of what main happens to be stuck doing.
+ *
+ * This does NOT fix a genuinely stuck ADC read — main will still be
+ * frozen and the joystick will stop responding. What it prevents is the
+ * watchdog forcing a full system PANIC/reboot over a transient hardware
+ * hiccup; the feeder task keeps the system alive long enough for the
+ * condition to often clear on its own (e.g. a brief brownout recovering),
+ * after which main resumes from wherever it was stuck.
+ *
+ * If the underlying hardware fault is persistent rather than transient
+ * (e.g. a genuinely damaged ADC unit), this task buys time but cannot
+ * make the joystick start working again — the real fix in that case is
+ * addressing the wiring/power issue itself (see the conversation history
+ * for the backlight wiring fix this was investigated alongside).
+ */
+static void watchdog_feeder_task(void *arg)
+{
+    (void)arg;
+
+    esp_err_t err = esp_task_wdt_add(NULL);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "watchdog_feeder_task: esp_task_wdt_add failed: %s",
+                 esp_err_to_name(err));
+    }
+
+    while (1) {
+        esp_task_wdt_reset();
+        vTaskDelay(pdMS_TO_TICKS(500));   /* well under the typical 5s TWDT timeout */
+    }
+}
 
 void app_main(void)
 {
@@ -34,9 +82,18 @@ void app_main(void)
         ESP_LOGW(TAG, "esp_task_wdt_add failed: %s", esp_err_to_name(wdt_err));
     }
 
+    /*
+     * Start the dedicated watchdog-feeder task — see its own comment block
+     * above for why this exists. Pinned to CPU0 (same core as main) at a
+     * higher priority so it always gets scheduled even if main is stuck
+     * inside a blocking call like a stalled ADC read.
+     */
+    xTaskCreatePinnedToCore(watchdog_feeder_task, "wdt_feeder", 2048, NULL,
+                             10, NULL, 0 /* CPU0 */);
+
     nvs_scores_init();
     joystick_init();
-    oled_init();
+    tft_init();
     sound_init();       /* GPIO13 passive buzzer via LEDC PWM                */
     pausebtn_init();    /* GPIO26 dedicated pause pushbutton, debounced      */
     actionbtn_init();   /* GPIO27 dedicated in-game action button, debounced */

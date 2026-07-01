@@ -1,3 +1,4 @@
+#if 0
 #pragma once
 
 #include <stdint.h>
@@ -22,4 +23,5 @@ void oled_draw_rect(int x, int y, int w, int h);
 
 #ifdef __cplusplus
 }
+#endif
 #endif

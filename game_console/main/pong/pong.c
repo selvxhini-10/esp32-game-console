@@ -1,23 +1,22 @@
 /*
- * PONG — single-player wall-bounce variant.
+ * PONG — single-player wall-bounce variant. 128x160 color version.
  *
- * Mechanics distinct from Snake:
- *   - Real-time physics (sub-pixel fixed-point position + velocity)
- *   - Paddle controlled by joystick X axis (left/right)
- *   - Ball bounces off top, left, right walls and the paddle
- *   - Missing the ball ends the game
- *   - Speed increases every 5 hits
+ * LAYOUT CHANGE FROM 128x64 MONO:
+ *   Old: P_H=56 play field, paddle at y=54, HUD crammed at y=57
+ *   New: P_H=144 play field (the extra 96px is almost entirely given to
+ *        vertical play space), paddle at y=140, dedicated 16px HUD strip
+ *        at the top instead of squeezed text at the very bottom.
  *
- * Display layout (128×64):
- *   y=0        top wall
- *   y=1..55    play field
- *   y=56..63   paddle zone + score strip
- *
- * Fixed-point: positions stored as 1/16 px (Q4 fixed), velocity in same units.
+ * The much taller field changes the FEEL of Pong meaningfully — the ball
+ * travels much further between paddle and top wall, giving more reaction
+ * time despite the same physics constants. BALL_SPEED_0 was bumped up
+ * slightly to compensate so rounds don't feel sluggish on the taller court.
  */
 
 #include "pong.h"
-#include "oled.h"
+#include "tft.h"
+#include "font.h"
+#include "palette.h"
 #include "esp_timer.h"
 #include "sound.h"
 #include <string.h>
@@ -25,93 +24,47 @@
 #include <stdlib.h>
 
 /* ─── layout ─────────────────────────────────────────────────────────────── */
-#define P_W         128
-#define P_H         56          /* play field height (below HUD) */
-#define HUD_Y       57          /* score text y                  */
-#define PADDLE_Y    54          /* top of paddle in px           */
-#define PADDLE_H    2
-#define PADDLE_W    20
-#define BALL_SIZE   3
+#define HUD_H       16           /* dedicated HUD strip at top      */
+#define P_W         TFT_WIDTH    /* 128                              */
+#define P_H         (TFT_HEIGHT - HUD_H)  /* 144 — play field height */
+#define PADDLE_Y    (HUD_H + P_H - 6)      /* near the bottom of field */
+#define PADDLE_H    3
+#define PADDLE_W    24
+#define BALL_SIZE   4
+
+/* ─── color palette ──────────────────────────────────────────────────────── */
+/*
+ * Color block switched to the shared palette. COL_WALL specifically was
+ * reported as rendering bright green on actual hardware despite being
+ * coded as TFT_BLUE — replacing it with an explicit palette reference
+ * (PAL_OUTLINE) removes the ambiguity and brings the boundary in line
+ * with the same border color used everywhere else in the console.
+ */
+#define COL_BG       PAL_BACKGROUND
+#define COL_HUD_TEXT PAL_TEXT
+#define COL_HUD_LINE PAL_BORDER
+#define COL_WALL     PAL_OUTLINE
+#define COL_PADDLE   PAL_BLUE_BRIGHT
+#define COL_BALL     PAL_GOLD
 
 /* ─── fixed-point (<<4 = ×16 sub-pixel) ─────────────────────────────────── */
-#define FP          4           /* fractional bits */
+#define FP          4
 #define TO_FP(n)    ((n) << FP)
 #define FROM_FP(n)  ((n) >> FP)
 
 /* ─── tuning ─────────────────────────────────────────────────────────────── */
-#define TICK_MS         16      /* ~60 fps physics step           */
-#define BALL_SPEED_0    24      /* initial speed in FP units/tick */
-#define BALL_SPEED_INC  2       /* added every HIT_INTERVAL hits  */
+#define TICK_MS         16
+#define BALL_SPEED_0    28      /* was 24 — slightly faster to suit the taller court */
+#define BALL_SPEED_INC  2
 #define HIT_INTERVAL    5
-#define PADDLE_SPEED    3       /* px per tick                    */
-
-/* ─── font (copied subset — digits + colon + S/C/O/R/E letters) ──────────── */
-static const uint8_t font5x7[][5] = {
-    {0x00,0x00,0x00,0x00,0x00}, {0x00,0x00,0x5F,0x00,0x00},
-    {0x00,0x07,0x00,0x07,0x00}, {0x14,0x7F,0x14,0x7F,0x14},
-    {0x24,0x2A,0x7F,0x2A,0x12}, {0x23,0x13,0x08,0x64,0x62},
-    {0x36,0x49,0x55,0x22,0x50}, {0x00,0x05,0x03,0x00,0x00},
-    {0x00,0x1C,0x22,0x41,0x00}, {0x00,0x41,0x22,0x1C,0x00},
-    {0x14,0x08,0x3E,0x08,0x14}, {0x08,0x08,0x3E,0x08,0x08},
-    {0x00,0x50,0x30,0x00,0x00}, {0x08,0x08,0x08,0x08,0x08},
-    {0x00,0x60,0x60,0x00,0x00}, {0x20,0x10,0x08,0x04,0x02},
-    {0x3E,0x51,0x49,0x45,0x3E}, {0x00,0x42,0x7F,0x40,0x00},
-    {0x42,0x61,0x51,0x49,0x46}, {0x21,0x41,0x45,0x4B,0x31},
-    {0x18,0x14,0x12,0x7F,0x10}, {0x27,0x45,0x45,0x45,0x39},
-    {0x3C,0x4A,0x49,0x49,0x30}, {0x01,0x71,0x09,0x05,0x03},
-    {0x36,0x49,0x49,0x49,0x36}, {0x06,0x49,0x49,0x29,0x1E},
-    {0x00,0x36,0x36,0x00,0x00}, {0x00,0x56,0x36,0x00,0x00},
-    {0x08,0x14,0x22,0x41,0x00}, {0x14,0x14,0x14,0x14,0x14},
-    {0x00,0x41,0x22,0x14,0x08}, {0x02,0x01,0x51,0x09,0x06},
-    {0x32,0x49,0x79,0x41,0x3E}, {0x7E,0x11,0x11,0x11,0x7E},
-    {0x7F,0x49,0x49,0x49,0x36}, {0x3E,0x41,0x41,0x41,0x22},
-    {0x7F,0x41,0x41,0x22,0x1C}, {0x7F,0x49,0x49,0x49,0x41},
-    {0x7F,0x09,0x09,0x09,0x01}, {0x3E,0x41,0x49,0x49,0x7A},
-    {0x7F,0x08,0x08,0x08,0x7F}, {0x00,0x41,0x7F,0x41,0x00},
-    {0x20,0x40,0x41,0x3F,0x01}, {0x7F,0x08,0x14,0x22,0x41},
-    {0x7F,0x40,0x40,0x40,0x40}, {0x7F,0x02,0x0C,0x02,0x7F},
-    {0x7F,0x04,0x08,0x10,0x7F}, {0x3E,0x41,0x41,0x41,0x3E},
-    {0x7F,0x09,0x09,0x09,0x06}, {0x3E,0x41,0x51,0x21,0x5E},
-    {0x7F,0x09,0x19,0x29,0x46}, {0x46,0x49,0x49,0x49,0x31},
-    {0x01,0x01,0x7F,0x01,0x01}, {0x3F,0x40,0x40,0x40,0x3F},
-    {0x1F,0x20,0x40,0x20,0x1F}, {0x3F,0x40,0x38,0x40,0x3F},
-    {0x63,0x14,0x08,0x14,0x63}, {0x07,0x08,0x70,0x08,0x07},
-    {0x61,0x51,0x49,0x45,0x43}, {0x00,0x7F,0x41,0x41,0x00},
-    {0x02,0x04,0x08,0x10,0x20}, {0x00,0x41,0x41,0x7F,0x00},
-    {0x04,0x02,0x01,0x02,0x04}, {0x40,0x40,0x40,0x40,0x40},
-    {0x00,0x01,0x02,0x04,0x00}, {0x20,0x54,0x54,0x54,0x78},
-    {0x7F,0x48,0x44,0x44,0x38}, {0x38,0x44,0x44,0x44,0x20},
-    {0x38,0x44,0x44,0x48,0x7F}, {0x38,0x54,0x54,0x54,0x18},
-    {0x08,0x7E,0x09,0x01,0x02}, {0x0C,0x52,0x52,0x52,0x3E},
-    {0x7F,0x08,0x04,0x04,0x78}, {0x00,0x44,0x7D,0x40,0x00},
-    {0x20,0x40,0x44,0x3D,0x00}, {0x7F,0x10,0x28,0x44,0x00},
-    {0x00,0x41,0x7F,0x40,0x00}, {0x7C,0x04,0x18,0x04,0x78},
-    {0x7C,0x08,0x04,0x04,0x78}, {0x38,0x44,0x44,0x44,0x38},
-    {0x7C,0x14,0x14,0x14,0x08}, {0x08,0x14,0x14,0x18,0x7C},
-    {0x7C,0x08,0x04,0x04,0x08}, {0x48,0x54,0x54,0x54,0x20},
-    {0x04,0x3F,0x44,0x40,0x20}, {0x3C,0x40,0x40,0x40,0x7C},
-    {0x1C,0x20,0x40,0x20,0x1C}, {0x3C,0x40,0x30,0x40,0x3C},
-    {0x44,0x28,0x10,0x28,0x44}, {0x0C,0x50,0x50,0x50,0x3C},
-    {0x44,0x64,0x54,0x4C,0x44}, {0x00,0x08,0x36,0x41,0x00},
-    {0x00,0x00,0x7F,0x00,0x00}, {0x00,0x41,0x36,0x08,0x00},
-    {0x10,0x08,0x08,0x10,0x08},
-};
-
-static void pong_draw_char(int x, int y, char c)
-{
-    if (c<0x20||c>0x7E) c='?';
-    const uint8_t *g=font5x7[c-0x20];
-    for(int col=0;col<5;col++){uint8_t b=g[col];for(int r=0;r<8;r++)if(b&(1<<r))oled_draw_pixel(x+col,y+r);}
-}
-static void pong_draw_str(int x, int y, const char *s)
-{ while(*s){pong_draw_char(x,y,*s++);x+=6;} }
+#define PADDLE_SPEED    4       /* was 3 — paddle needs to cover more relative width on wider feel */
 
 /* ─── state ──────────────────────────────────────────────────────────────── */
 static struct {
-    int  bx, by;       /* ball position FP */
-    int  vx, vy;       /* ball velocity FP/tick */
-    int  paddle_x;     /* left edge of paddle (px) */
-    int  dx_intent;    /* joystick intent -1/0/1 */
+    int  bx, by;
+    int  vx, vy;
+    int  paddle_x;
+    int  dx_intent;
     uint32_t score;
     int  hits;
     int  speed;
@@ -126,9 +79,8 @@ void pong_init(void)
     memset(&P,0,sizeof(P));
     P.paddle_x = (P_W - PADDLE_W) / 2;
     P.bx = TO_FP(P_W/2);
-    P.by = TO_FP(P_H/2);
+    P.by = TO_FP(HUD_H + P_H/2);
     P.speed = BALL_SPEED_0;
-    /* diagonal launch */
     P.vx =  P.speed;
     P.vy = -P.speed;
     P.alive = true;
@@ -138,7 +90,7 @@ void pong_init(void)
 void pong_input(int dx, int dy, bool btn)
 {
     (void)dy; (void)btn;
-    P.dx_intent = dx;  /* -1/0/1 from joystick X */
+    P.dx_intent = dx;
 }
 
 bool pong_tick(uint32_t *score_out)
@@ -146,29 +98,23 @@ bool pong_tick(uint32_t *score_out)
     if (!P.alive) { *score_out = P.score; return false; }
 
     int64_t now = pong_now();
-    if ((now - P.last_tick) < TICK_MS) return true;
+    if ((now - P.last_tick) < TICK_MS) { *score_out = P.score; return true; }
     P.last_tick = now;
 
-    /* Move paddle */
     P.paddle_x += P.dx_intent * PADDLE_SPEED;
-    if (P.paddle_x < 1)           P.paddle_x = 1;
+    if (P.paddle_x < 1)              P.paddle_x = 1;
     if (P.paddle_x > P_W-1-PADDLE_W) P.paddle_x = P_W-1-PADDLE_W;
 
-    /* Move ball */
     P.bx += P.vx;
     P.by += P.vy;
 
     int bpx = FROM_FP(P.bx);
     int bpy = FROM_FP(P.by);
 
-    /* Wall: left */
     if (bpx <= 1) { P.vx = abs(P.vx); P.bx = TO_FP(1); sound_play(NOTE_E4, 25); }
-    /* Wall: right */
     if (bpx + BALL_SIZE >= P_W-1) { P.vx = -abs(P.vx); P.bx = TO_FP(P_W-1-BALL_SIZE); sound_play(NOTE_E4, 25); }
-    /* Wall: top */
-    if (bpy <= 1) { P.vy = abs(P.vy); P.by = TO_FP(1); sound_play(NOTE_E4, 25); }
+    if (bpy <= HUD_H+1) { P.vy = abs(P.vy); P.by = TO_FP(HUD_H+1); sound_play(NOTE_E4, 25); }
 
-    /* Paddle collision */
     bpx = FROM_FP(P.bx); bpy = FROM_FP(P.by);
     bool paddle_hit = (bpy + BALL_SIZE >= PADDLE_Y) &&
                       (bpy + BALL_SIZE <= PADDLE_Y + PADDLE_H + 2) &&
@@ -178,38 +124,25 @@ bool pong_tick(uint32_t *score_out)
     if (paddle_hit) {
         P.vy = -abs(P.vy);
         P.by = TO_FP(PADDLE_Y - BALL_SIZE - 1);
-        /* Angle varies based on hit position relative to paddle centre */
         int centre_offset = (bpx + BALL_SIZE/2) - (P.paddle_x + PADDLE_W/2);
         P.vx = (centre_offset * P.speed) / (PADDLE_W/2);
         if (P.vx == 0) P.vx = 1;
 
         P.score += 5;
         P.hits++;
-
-        /* Paddle hit is a slightly higher pitch than wall bounces — gives
-         * the player audible confirmation they actually returned the ball
-         * vs just hearing a generic "bounce" from the walls. */
         sound_play(NOTE_C5, 35);
 
         if ((P.hits % HIT_INTERVAL) == 0) {
             P.speed += BALL_SPEED_INC;
-            /* Rescale velocity to new speed */
             P.vx = (P.vx > 0) ? P.speed : -P.speed;
             P.vy = -P.speed;
-
-            /* Distinct "speed up" cue — two quick rising notes, separate
-             * from the single-note paddle hit so the player notices the
-             * difficulty increase without having to watch the ball speed */
             static const Note speedup_tune[] = { { NOTE_G4, 40 }, { NOTE_C5, 60 } };
             sound_play_melody(speedup_tune, sizeof(speedup_tune)/sizeof(speedup_tune[0]));
         }
     }
 
-    /* Miss */
-    if (FROM_FP(P.by) > P_H + 4) {
+    if (FROM_FP(P.by) > HUD_H + P_H + 4) {
         P.alive = false;
-        /* Descending "miss" melody — distinct from the single bounce/hit
-         * tones so a miss is unmistakably the end of the round by ear */
         static const Note miss_tune[] = {
             { NOTE_A4, 90 }, { NOTE_F4, 90 }, { NOTE_C4, 250 },
         };
@@ -224,26 +157,25 @@ bool pong_tick(uint32_t *score_out)
 
 void pong_draw(void)
 {
+    tft_fill_rect(0, HUD_H, P_W, P_H, COL_BG);
+
+    /* HUD */
+    tft_fill_rect(0, 0, P_W, HUD_H, COL_BG);
+    char buf[20];
+    snprintf(buf, sizeof(buf), "HITS:%d  SCORE:%lu", (int)P.hits, (unsigned long)P.score);
+    font_draw_str(2, 4, buf, COL_HUD_TEXT);
+    for (int x = 0; x < P_W; x++) tft_draw_pixel(x, HUD_H - 1, COL_HUD_LINE);
+
     /* Walls */
-    for(int x=0;x<P_W;x++) oled_draw_pixel(x,0);
-    for(int x=0;x<P_W;x++) oled_draw_pixel(x,P_H);
-    for(int y=0;y<P_H;y++) oled_draw_pixel(0,y);
-    for(int y=0;y<P_H;y++) oled_draw_pixel(P_W-1,y);
+    for(int x=0;x<P_W;x++) tft_draw_pixel(x, HUD_H,        COL_WALL);
+    for(int x=0;x<P_W;x++) tft_draw_pixel(x, HUD_H+P_H-1,  COL_WALL);
+    for(int y=HUD_H;y<HUD_H+P_H;y++) tft_draw_pixel(0,     y, COL_WALL);
+    for(int y=HUD_H;y<HUD_H+P_H;y++) tft_draw_pixel(P_W-1, y, COL_WALL);
 
     /* Paddle */
-    for(int x=P.paddle_x;x<P.paddle_x+PADDLE_W;x++){
-        oled_draw_pixel(x,PADDLE_Y);
-        oled_draw_pixel(x,PADDLE_Y+1);
-    }
+    tft_fill_rect(P.paddle_x, PADDLE_Y, PADDLE_W, PADDLE_H, COL_PADDLE);
 
     /* Ball */
     int bx=FROM_FP(P.bx), by=FROM_FP(P.by);
-    for(int dy=0;dy<BALL_SIZE;dy++)
-        for(int dx=0;dx<BALL_SIZE;dx++)
-            oled_draw_pixel(bx+dx,by+dy);
-
-    /* Score */
-    char buf[16];
-    snprintf(buf,sizeof(buf),"HIT:%d SCR:%lu",(int)P.hits,(unsigned long)P.score);
-    pong_draw_str(2, HUD_Y, buf);
+    tft_fill_rect(bx, by, BALL_SIZE, BALL_SIZE, COL_BALL);
 }

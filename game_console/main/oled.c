@@ -1,3 +1,4 @@
+#if 0
 #include "oled.h"
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
@@ -171,3 +172,4 @@ void oled_draw_rect(int x, int y, int w, int h)
         oled_draw_pixel(x + w - 1, y + i);
     }
 }
+#endif

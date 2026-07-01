@@ -1,27 +1,33 @@
 /*
- * FLAPPY — gravity-based side-scroller for the ESP32 OLED console.
+ * FLAPPY — gravity-based side-scroller. 128x160 color version.
  *
- * Physics: fixed-point Q4 (values are ×16 of real pixels).
- * Display: 128×64 px, 1-bit.
+ * LAYOUT CHANGE FROM 128x64 MONO:
+ *   Old: FIELD_H=56, very cramped — bird had ~50px of vertical room
+ *   New: FIELD_H=144, the entire extra 96px goes to flight room. This
+ *        is the single biggest gameplay improvement from the screen
+ *        upgrade — Flappy genuinely plays better with more vertical
+ *        space to react in, independent of any color addition.
  *
- * Layout:
- *   y=0..55   play field
- *   y=56      ground line
- *   y=57..63  HUD strip (score)
+ * GAP_Y_MAX/MIN and gravity/flap constants are recalculated for the
+ * taller field — the relative "feel" (how much of the field height the
+ * gap takes up) is kept similar to the old version rather than just
+ * scaling pixel-for-pixel, since a literal 2.5x scale-up of GAP_H would
+ * make the game trivially easy.
  *
- * Pipes:
- *   Two pipe slots scroll left. Each slot holds an (x, gap_y) pair.
- *   gap_y is the top of the opening; opening height is GAP_H pixels.
- *   When a pipe exits the left edge it is recycled to the right
- *   with a new random gap_y.
- *
- * Collision:
- *   Bird is a 5×5 pixel box. Collision is axis-aligned rectangle vs
- *   pipe rectangles and ground.
+ * BACKGROUND PARALLAX (new):
+ * Two extra scrolling layers behind the pipes for visual depth —
+ * distant hills (a procedural zigzag silhouette, no storage needed,
+ * computed directly from x each frame) and a small fixed set of clouds
+ * that drift at roughly half pipe speed. Both layers cost very little:
+ * CLOUD_COUNT clouds are only 3 filled rects each, and the hill strip is
+ * one fill_rect per screen column segment — comfortably within the
+ * existing per-frame draw budget the pipes/bird already use.
  */
 
 #include "flappy.h"
-#include "oled.h"
+#include "tft.h"
+#include "font.h"
+#include "palette.h"
 #include "esp_timer.h"
 #include "esp_random.h"
 #include "sound.h"
@@ -29,124 +35,88 @@
 #include <stdio.h>
 
 /* ─── layout ─────────────────────────────────────────────────────────────── */
-#define FIELD_H     56          /* play area height                */
-#define GROUND_Y    56          /* y of ground line                */
-#define HUD_Y       58          /* score text y                    */
+#define HUD_H       16
+#define FIELD_H     (TFT_HEIGHT - HUD_H - 8)   /* leave 8px for ground strip */
+#define GROUND_Y    (HUD_H + FIELD_H)
+
+/* ─── color palette ──────────────────────────────────────────────────────── */
+#define COL_BG       PAL_BG_PANEL     /* was TFT_SKYBLUE — now a dusk-toned
+                                          navy/blue sky consistent with the
+                                          rest of the console's palette   */
+#define COL_HUD_TEXT PAL_TEXT
+#define COL_HUD_BG   PAL_BG_DARK
+#define COL_GROUND   PAL_OUTLINE
+#define COL_PIPE     PAL_BLUE_MAIN
+#define COL_PIPE_CAP PAL_BLUE_BRIGHT
+#define COL_BIRD_BODY PAL_GOLD
+#define COL_BIRD_BEAK TFT_ORANGE     /* kept outside the palette on purpose —
+                                        the beak is a small accent detail,
+                                        not a structural UI element, and a
+                                        warm orange reads clearly against
+                                        the cool blue bird body            */
+#define COL_BIRD_EYE  PAL_BG_DARK
+#define COL_CLOUD     PAL_BLUE_BRIGHT
+#define COL_HILL      PAL_OUTLINE
 
 /* ─── bird ───────────────────────────────────────────────────────────────── */
-#define BIRD_X      20          /* fixed horizontal position (px)  */
-#define BIRD_W      5
-#define BIRD_H      5
-#define BIRD_START_Y 24         /* start y (px)                    */
+#define BIRD_X      24
+#define BIRD_W      9             /* was 5 — bigger bird for the bigger screen */
+#define BIRD_H      9
+#define BIRD_START_Y (HUD_H + FIELD_H/2)
 
 /* ─── physics (Q4 fixed-point) ───────────────────────────────────────────── */
 #define FP           4
 #define TO_FP(n)    ((n) << FP)
 #define FROM_FP(n)  ((n) >> FP)
 
-#define GRAVITY      2          /* FP units added to vy per tick — softer fall */
-#define FLAP_VY    (-28)        /* FP upward impulse — gentler, less overshoot */
-#define VY_MAX       22         /* FP terminal fall velocity — less punishing */
+#define GRAVITY      3           /* re-tuned for the taller field */
+#define FLAP_VY    (-46)
+#define VY_MAX       36
 
 /* ─── pipes ──────────────────────────────────────────────────────────────── */
 #define PIPE_COUNT   2
-#define PIPE_W       8          /* pipe width in pixels             */
-#define PIPE_SPEED   2          /* pixels per tick (px, not FP)     */
-#define PIPE_SPACING 72         /* horizontal gap between pipes — more reaction time */
-#define GAP_H        22         /* opening height in pixels — wider for playability */
-#define GAP_Y_MIN    8          /* minimum top of gap from field top*/
-#define GAP_Y_MAX   (FIELD_H - GAP_H - 6)  /* maximum top of gap — 6px bottom margin */
+#define PIPE_W       14          /* was 8 — wider to match the bigger bird   */
+#define PIPE_SPEED   3
+#define PIPE_SPACING 110
+#define GAP_H        46          /* scaled to keep similar relative difficulty */
+#define GAP_Y_MIN    (HUD_H + 12)
+#define GAP_Y_MAX    (GROUND_Y - GAP_H - 12)
 
-/* ─── timing ─────────────────────────────────────────────────────────────── */
-#define TICK_MS      30         /* ~33 fps physics tick             */
+#define TICK_MS      30
 
-/* ─── score ──────────────────────────────────────────────────────────────── */
-/* Bird scores when its left edge passes the right edge of a pipe */
-#define SCORE_X     (BIRD_X)    /* compare pipe_x + PIPE_W <= BIRD_X */
+/* ─── background parallax ───────────────────────────────────────────────── */
+#define CLOUD_COUNT     3
+#define CLOUD_W        24
+#define CLOUD_H        10
+#define CLOUD_SPEED_DIV 3    /* clouds move at PIPE_SPEED/CLOUD_SPEED_DIV —
+                                 slower than pipes for a parallax depth cue */
 
-/* ─── font (digits + letters needed for HUD) ─────────────────────────────── */
-static const uint8_t fl_font[][5] = {
-    {0x00,0x00,0x00,0x00,0x00},{0x00,0x00,0x5F,0x00,0x00},
-    {0x00,0x07,0x00,0x07,0x00},{0x14,0x7F,0x14,0x7F,0x14},
-    {0x24,0x2A,0x7F,0x2A,0x12},{0x23,0x13,0x08,0x64,0x62},
-    {0x36,0x49,0x55,0x22,0x50},{0x00,0x05,0x03,0x00,0x00},
-    {0x00,0x1C,0x22,0x41,0x00},{0x00,0x41,0x22,0x1C,0x00},
-    {0x14,0x08,0x3E,0x08,0x14},{0x08,0x08,0x3E,0x08,0x08},
-    {0x00,0x50,0x30,0x00,0x00},{0x08,0x08,0x08,0x08,0x08},
-    {0x00,0x60,0x60,0x00,0x00},{0x20,0x10,0x08,0x04,0x02},
-    {0x3E,0x51,0x49,0x45,0x3E},{0x00,0x42,0x7F,0x40,0x00},
-    {0x42,0x61,0x51,0x49,0x46},{0x21,0x41,0x45,0x4B,0x31},
-    {0x18,0x14,0x12,0x7F,0x10},{0x27,0x45,0x45,0x45,0x39},
-    {0x3C,0x4A,0x49,0x49,0x30},{0x01,0x71,0x09,0x05,0x03},
-    {0x36,0x49,0x49,0x49,0x36},{0x06,0x49,0x49,0x29,0x1E},
-    {0x00,0x36,0x36,0x00,0x00},{0x00,0x56,0x36,0x00,0x00},
-    {0x08,0x14,0x22,0x41,0x00},{0x14,0x14,0x14,0x14,0x14},
-    {0x00,0x41,0x22,0x14,0x08},{0x02,0x01,0x51,0x09,0x06},
-    {0x32,0x49,0x79,0x41,0x3E},{0x7E,0x11,0x11,0x11,0x7E},
-    {0x7F,0x49,0x49,0x49,0x36},{0x3E,0x41,0x41,0x41,0x22},
-    {0x7F,0x41,0x41,0x22,0x1C},{0x7F,0x49,0x49,0x49,0x41},
-    {0x7F,0x09,0x09,0x09,0x01},{0x3E,0x41,0x49,0x49,0x7A},
-    {0x7F,0x08,0x08,0x08,0x7F},{0x00,0x41,0x7F,0x41,0x00},
-    {0x20,0x40,0x41,0x3F,0x01},{0x7F,0x08,0x14,0x22,0x41},
-    {0x7F,0x40,0x40,0x40,0x40},{0x7F,0x02,0x0C,0x02,0x7F},
-    {0x7F,0x04,0x08,0x10,0x7F},{0x3E,0x41,0x41,0x41,0x3E},
-    {0x7F,0x09,0x09,0x09,0x06},{0x3E,0x41,0x51,0x21,0x5E},
-    {0x7F,0x09,0x19,0x29,0x46},{0x46,0x49,0x49,0x49,0x31},
-    {0x01,0x01,0x7F,0x01,0x01},{0x3F,0x40,0x40,0x40,0x3F},
-    {0x1F,0x20,0x40,0x20,0x1F},{0x3F,0x40,0x38,0x40,0x3F},
-    {0x63,0x14,0x08,0x14,0x63},{0x07,0x08,0x70,0x08,0x07},
-    {0x61,0x51,0x49,0x45,0x43},{0x00,0x7F,0x41,0x41,0x00},
-    {0x02,0x04,0x08,0x10,0x20},{0x00,0x41,0x41,0x7F,0x00},
-    {0x04,0x02,0x01,0x02,0x04},{0x40,0x40,0x40,0x40,0x40},
-    {0x00,0x01,0x02,0x04,0x00},{0x20,0x54,0x54,0x54,0x78},
-    {0x7F,0x48,0x44,0x44,0x38},{0x38,0x44,0x44,0x44,0x20},
-    {0x38,0x44,0x44,0x48,0x7F},{0x38,0x54,0x54,0x54,0x18},
-    {0x08,0x7E,0x09,0x01,0x02},{0x0C,0x52,0x52,0x52,0x3E},
-    {0x7F,0x08,0x04,0x04,0x78},{0x00,0x44,0x7D,0x40,0x00},
-    {0x20,0x40,0x44,0x3D,0x00},{0x7F,0x10,0x28,0x44,0x00},
-    {0x00,0x41,0x7F,0x40,0x00},{0x7C,0x04,0x18,0x04,0x78},
-    {0x7C,0x08,0x04,0x04,0x78},{0x38,0x44,0x44,0x44,0x38},
-    {0x7C,0x14,0x14,0x14,0x08},{0x08,0x14,0x14,0x18,0x7C},
-    {0x7C,0x08,0x04,0x04,0x08},{0x48,0x54,0x54,0x54,0x20},
-    {0x04,0x3F,0x44,0x40,0x20},{0x3C,0x40,0x40,0x40,0x7C},
-    {0x1C,0x20,0x40,0x20,0x1C},{0x3C,0x40,0x30,0x40,0x3C},
-    {0x44,0x28,0x10,0x28,0x44},{0x0C,0x50,0x50,0x50,0x3C},
-    {0x44,0x64,0x54,0x4C,0x44},{0x00,0x08,0x36,0x41,0x00},
-    {0x00,0x00,0x7F,0x00,0x00},{0x00,0x41,0x36,0x08,0x00},
-    {0x10,0x08,0x08,0x10,0x08},
-};
-
-static void fl_char(int x, int y, char c)
-{
-    if (c < 0x20 || c > 0x7E) c = '?';
-    const uint8_t *g = fl_font[c - 0x20];
-    for (int col = 0; col < 5; col++) {
-        uint8_t b = g[col];
-        for (int row = 0; row < 8; row++)
-            if (b & (1 << row)) oled_draw_pixel(x + col, y + row);
-    }
-}
-
-static void fl_str(int x, int y, const char *s)
-{
-    while (*s) { fl_char(x, y, *s++); x += 6; }
-}
+#define HILL_H         14    /* height of the distant hill silhouette band */
+#define HILL_PERIOD    40    /* horizontal period of the zigzag pattern, px */
+#define HILL_AMPLITUDE  6    /* how tall each hill bump is, px */
 
 /* ─── pipe struct ────────────────────────────────────────────────────────── */
 typedef struct {
-    int x;          /* left edge of pipe (pixels) */
-    int gap_y;      /* top of gap (pixels)        */
-    bool scored;    /* true once point awarded     */
+    int x;
+    int gap_y;
+    bool scored;
 } Pipe;
+
+/* ─── cloud struct ───────────────────────────────────────────────────────── */
+typedef struct {
+    int16_t x, y;
+} Cloud;
 
 /* ─── state ──────────────────────────────────────────────────────────────── */
 static struct {
-    int      bird_y_fp;     /* bird y position, fixed-point */
-    int      bird_vy_fp;    /* bird y velocity, fixed-point */
+    int      bird_y_fp;
+    int      bird_vy_fp;
     Pipe     pipes[PIPE_COUNT];
+    Cloud    clouds[CLOUD_COUNT];
+    int      hill_scroll_x;     /* accumulated hill parallax offset */
     uint32_t score;
     bool     alive;
-    bool     btn_last;      /* for rising-edge detection    */
+    bool     btn_last;
     int64_t  last_tick_ms;
 } F;
 
@@ -157,7 +127,6 @@ static int rand_gap_y(void)
     return GAP_Y_MIN + (int)(esp_random() % (uint32_t)(GAP_Y_MAX - GAP_Y_MIN + 1));
 }
 
-/* ─── AABB collision helper ──────────────────────────────────────────────── */
 static bool rects_overlap(int ax, int ay, int aw, int ah,
                            int bx, int by, int bw, int bh)
 {
@@ -165,7 +134,44 @@ static bool rects_overlap(int ax, int ay, int aw, int ah,
              ay + ah <= by || by + bh <= ay);
 }
 
-/* ─── public API ─────────────────────────────────────────────────────────── */
+/*
+ * Cloud sprite — a 3-lobe puffy cloud silhouette built from 3 overlapping
+ * filled rects (a wide base + two rounded-looking top puffs). Cheap to
+ * draw (3 fill_rect calls) and reads clearly as a cloud shape at this
+ * scale without needing a full bitmap.
+ */
+static void draw_cloud(int x, int y)
+{
+    if (x + CLOUD_W < 0 || x > TFT_WIDTH) return;   /* off-screen, skip */
+    tft_fill_rect(x + 4,  y + 4, 16, 6, COL_CLOUD);   /* base body */
+    tft_fill_rect(x + 0,  y + 0, 10, 8, COL_CLOUD);   /* left puff  */
+    tft_fill_rect(x + 12, y + 0, 12, 8, COL_CLOUD);   /* right puff */
+}
+
+/*
+ * Distant hill silhouette — drawn procedurally from a simple triangular
+ * zigzag pattern rather than stored as a bitmap or point array, so it
+ * costs zero extra static memory. hill_scroll_x shifts the pattern's
+ * phase each frame for a slow parallax scroll independent of the pipes.
+ * Drawn as a sequence of narrow vertical fill_rect columns, each column's
+ * height following the zigzag — visually reads as rolling hills at a
+ * fraction of the cost of a full bitmap silhouette.
+ */
+static void draw_hills(int scroll_x)
+{
+    int base_y = GROUND_Y - HILL_H;
+    for (int col = 0; col < TFT_WIDTH; col += 2) {
+        int phase = (col + scroll_x) % HILL_PERIOD;
+        /* Triangular wave: rises for first half of period, falls for
+         * second half — cheap integer math, no trig needed. */
+        int half = HILL_PERIOD / 2;
+        int height = (phase < half)
+            ? (phase * HILL_AMPLITUDE) / half
+            : ((HILL_PERIOD - phase) * HILL_AMPLITUDE) / half;
+        int col_h = HILL_H - height;
+        tft_fill_rect(col, base_y + height, 2, col_h, COL_HILL);
+    }
+}
 
 void flappy_init(void)
 {
@@ -175,21 +181,28 @@ void flappy_init(void)
     F.alive        = true;
     F.last_tick_ms = fl_now();
 
-    /* Stagger pipes across the screen */
     for (int i = 0; i < PIPE_COUNT; i++) {
-        F.pipes[i].x      = 128 + i * PIPE_SPACING;
+        F.pipes[i].x      = TFT_WIDTH + i * PIPE_SPACING;
         F.pipes[i].gap_y  = rand_gap_y();
         F.pipes[i].scored = false;
     }
+
+    /* Spread clouds evenly across the screen width at boot so they don't
+     * all pop in from the right edge one at a time — gives an already-
+     * populated sky on the very first frame instead of an empty one. */
+    for (int i = 0; i < CLOUD_COUNT; i++) {
+        F.clouds[i].x = (int16_t)((i * TFT_WIDTH) / CLOUD_COUNT);
+        F.clouds[i].y = (int16_t)(HUD_H + 6 + (int)(esp_random() % 20));
+    }
+    F.hill_scroll_x = 0;
 }
 
 void flappy_input(int dx, int dy, bool btn)
 {
     (void)dx; (void)dy;
-    /* Rising edge: flap on button press (not hold) */
     if (btn && !F.btn_last) {
         F.bird_vy_fp = FLAP_VY;
-        sound_play(NOTE_E4, 40);   /* quick flap tick — short so rapid flapping doesn't stack delays */
+        sound_play(NOTE_E4, 40);
     }
     F.btn_last = btn;
 }
@@ -202,28 +215,42 @@ bool flappy_tick(uint32_t *score_out)
     if ((now - F.last_tick_ms) < TICK_MS) { *score_out = F.score; return true; }
     F.last_tick_ms = now;
 
-    /* ── gravity ── */
     F.bird_vy_fp += GRAVITY;
     if (F.bird_vy_fp > VY_MAX) F.bird_vy_fp = VY_MAX;
     F.bird_y_fp  += F.bird_vy_fp;
 
+    /*
+     * Background parallax scroll — clouds move slower than pipes
+     * (PIPE_SPEED / CLOUD_SPEED_DIV), hills scroll at their own fixed
+     * rate. Both wrap independently of the pipe/collision logic below,
+     * since they're purely decorative and never interact with gameplay.
+     */
+    for (int i = 0; i < CLOUD_COUNT; i++) {
+        int cloud_speed = PIPE_SPEED / CLOUD_SPEED_DIV;
+        if (cloud_speed < 1) cloud_speed = 1;   /* guard against future
+                                                    constant changes making
+                                                    this divide to zero */
+        F.clouds[i].x -= cloud_speed;
+        if (F.clouds[i].x + CLOUD_W < 0) {
+            F.clouds[i].x = TFT_WIDTH;
+            F.clouds[i].y = (int16_t)(HUD_H + 6 + (int)(esp_random() % 20));
+        }
+    }
+    F.hill_scroll_x = (F.hill_scroll_x + 1) % HILL_PERIOD;
+
     int bird_y = FROM_FP(F.bird_y_fp);
 
-    /* ── ground / ceiling collision ── */
-    if (bird_y + BIRD_H >= GROUND_Y || bird_y < 0) {
+    if (bird_y + BIRD_H >= GROUND_Y || bird_y < HUD_H) {
         F.alive = false;
-        sound_punch(120, 200);   /* low-frequency punch — more impact than a musical note for a crash */
+        sound_punch(120, 200);
         *score_out = F.score;
         return false;
     }
 
-    /* ── scroll pipes + collision + scoring ── */
     for (int i = 0; i < PIPE_COUNT; i++) {
         F.pipes[i].x -= PIPE_SPEED;
 
-        /* Recycle off-screen pipes */
         if (F.pipes[i].x + PIPE_W < 0) {
-            /* Find the rightmost pipe and place this one beyond it */
             int max_x = 0;
             for (int j = 0; j < PIPE_COUNT; j++)
                 if (j != i && F.pipes[j].x > max_x)
@@ -236,14 +263,12 @@ bool flappy_tick(uint32_t *score_out)
         int px = F.pipes[i].x;
         int gy = F.pipes[i].gap_y;
 
-        /* Collision: top pipe rectangle */
         if (rects_overlap(BIRD_X, bird_y, BIRD_W, BIRD_H,
-                          px, 0, PIPE_W, gy)) {
+                          px, HUD_H, PIPE_W, gy - HUD_H)) {
             F.alive = false;
-            sound_punch(120, 200);   /* same impact punch as ground hit */
+            sound_punch(120, 200);
             *score_out = F.score; return false;
         }
-        /* Collision: bottom pipe rectangle */
         if (rects_overlap(BIRD_X, bird_y, BIRD_W, BIRD_H,
                           px, gy + GAP_H, PIPE_W, GROUND_Y - gy - GAP_H)) {
             F.alive = false;
@@ -251,12 +276,9 @@ bool flappy_tick(uint32_t *score_out)
             *score_out = F.score; return false;
         }
 
-        /* Score: bird's right edge clears pipe's right edge */
         if (!F.pipes[i].scored && (BIRD_X + BIRD_W) > (px + PIPE_W)) {
             F.score++;
             F.pipes[i].scored = true;
-            /* Single note, not a melody — pipes clear in rapid succession
-             * and a longer tune per pipe would start to queue up awkwardly */
             sound_play(NOTE_E5, 50);
         }
     }
@@ -269,63 +291,50 @@ void flappy_draw(void)
 {
     int bird_y = FROM_FP(F.bird_y_fp);
 
-    /* Ground */
-    for (int x = 0; x < 128; x++) oled_draw_pixel(x, GROUND_Y);
+    /* Sky background + HUD */
+    tft_fill_rect(0, HUD_H, TFT_WIDTH, FIELD_H, COL_BG);
+    tft_fill_rect(0, 0, TFT_WIDTH, HUD_H, COL_HUD_BG);
+
+    /* Background parallax layers — drawn back-to-front: distant hills
+     * first (furthest away, slowest apparent motion), then clouds
+     * (nearer, drawn on top of hills), then ground/pipes/bird on top of
+     * everything as before. This ordering is what actually sells the
+     * depth illusion — closer layers must occlude farther ones. */
+    draw_hills(F.hill_scroll_x);
+    for (int i = 0; i < CLOUD_COUNT; i++) {
+        draw_cloud(F.clouds[i].x, F.clouds[i].y);
+    }
+
+    /* Ground strip */
+    tft_fill_rect(0, GROUND_Y, TFT_WIDTH, TFT_HEIGHT - GROUND_Y, COL_GROUND);
 
     /* Pipes */
     for (int i = 0; i < PIPE_COUNT; i++) {
         int px = F.pipes[i].x;
         int gy = F.pipes[i].gap_y;
 
-        if (px + PIPE_W < 0 || px > 127) continue;
+        if (px + PIPE_W < 0 || px > TFT_WIDTH) continue;
 
-        /* Top pipe — filled */
-        for (int y = 0; y < gy; y++)
-            for (int x = px; x < px + PIPE_W && x < 128; x++)
-                if (x >= 0) oled_draw_pixel(x, y);
+        /* Top pipe body */
+        tft_fill_rect(px, HUD_H, PIPE_W, gy - HUD_H, COL_PIPE);
+        /* Top pipe cap — slightly wider, darker green */
+        tft_fill_rect(px - 2, gy - 4, PIPE_W + 4, 4, COL_PIPE_CAP);
 
-        /* Top pipe cap (1px wider each side) */
-        for (int x = px - 1; x < px + PIPE_W + 1 && x < 128; x++)
-            if (x >= 0 && gy > 0) {
-                oled_draw_pixel(x, gy - 1);
-            }
-
-        /* Bottom pipe — filled */
-        for (int y = gy + GAP_H; y < GROUND_Y; y++)
-            for (int x = px; x < px + PIPE_W && x < 128; x++)
-                if (x >= 0) oled_draw_pixel(x, y);
-
+        /* Bottom pipe body */
+        tft_fill_rect(px, gy + GAP_H, PIPE_W, GROUND_Y - gy - GAP_H, COL_PIPE);
         /* Bottom pipe cap */
-        for (int x = px - 1; x < px + PIPE_W + 1 && x < 128; x++)
-            if (x >= 0 && gy + GAP_H < GROUND_Y) {
-                oled_draw_pixel(x, gy + GAP_H);
-            }
+        tft_fill_rect(px - 2, gy + GAP_H, PIPE_W + 4, 4, COL_PIPE_CAP);
     }
 
-    /*
-     * Bird — 5×5 box with a pointed beak (rightward triangle)
-     * and a small tail notch on the left.
-     *
-     *  .XXXX.   row 0
-     *  XXXXXX>  row 1  (beak pixel at col 5)
-     *  XXXXXX>  row 2
-     *  XXXXX.   row 3
-     *  .XXX..   row 4
-     */
-    for (int dy = 0; dy < BIRD_H; dy++) {
-        for (int dx = 0; dx < BIRD_W; dx++) {
-            /* Skip corners for rounded look */
-            if ((dy == 0 && dx == 0) || (dy == BIRD_H-1 && dx == 0))
-                continue;
-            oled_draw_pixel(BIRD_X + dx, bird_y + dy);
-        }
-    }
-    /* Beak — one pixel to the right of centre rows */
-    oled_draw_pixel(BIRD_X + BIRD_W,     bird_y + 1);
-    oled_draw_pixel(BIRD_X + BIRD_W,     bird_y + 2);
+    /* Bird body — yellow rounded box */
+    tft_fill_rect(BIRD_X, bird_y, BIRD_W, BIRD_H, COL_BIRD_BODY);
+    /* Beak — orange triangle-ish block to the right */
+    tft_fill_rect(BIRD_X + BIRD_W, bird_y + BIRD_H/2 - 1, 3, 3, COL_BIRD_BEAK);
+    /* Eye */
+    tft_draw_pixel(BIRD_X + BIRD_W - 3, bird_y + 2, COL_BIRD_EYE);
 
-    /* HUD */
+    /* HUD text */
     char buf[16];
-    snprintf(buf, sizeof(buf), "SCORE:%lu", (unsigned long)F.score);
-    fl_str(2, HUD_Y, buf);
+    snprintf(buf, sizeof(buf), "SCORE: %lu", (unsigned long)F.score);
+    font_draw_str(2, 4, buf, COL_HUD_TEXT);
 }

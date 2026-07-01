@@ -1,10 +1,13 @@
 idf_component_register(
     SRCS
         "app_main.c"
-        "oled.c"
+        "tft.c"
+        "font.c"
+        "effects.c"
         "joystick.c"
         "nvs_scores.c"
         "splash.c"
+        "splash_font.c"
         "console.c"
         "sound.c"
         "pausebtn.c"

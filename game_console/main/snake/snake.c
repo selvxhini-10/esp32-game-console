@@ -1,68 +1,28 @@
 #include "snake.h"
-#include "oled.h"
+#include "tft.h"
+#include "font.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "sound.h"
 #include <string.h>
 #include <stdio.h>
 
-/* ─── font (5×7, ASCII 0x20-0x7E, columns LSB=top) ─────────────────────── */
-static const uint8_t font5x7[][5] = {
-    {0x00,0x00,0x00,0x00,0x00}, {0x00,0x00,0x5F,0x00,0x00},
-    {0x00,0x07,0x00,0x07,0x00}, {0x14,0x7F,0x14,0x7F,0x14},
-    {0x24,0x2A,0x7F,0x2A,0x12}, {0x23,0x13,0x08,0x64,0x62},
-    {0x36,0x49,0x55,0x22,0x50}, {0x00,0x05,0x03,0x00,0x00},
-    {0x00,0x1C,0x22,0x41,0x00}, {0x00,0x41,0x22,0x1C,0x00},
-    {0x14,0x08,0x3E,0x08,0x14}, {0x08,0x08,0x3E,0x08,0x08},
-    {0x00,0x50,0x30,0x00,0x00}, {0x08,0x08,0x08,0x08,0x08},
-    {0x00,0x60,0x60,0x00,0x00}, {0x20,0x10,0x08,0x04,0x02},
-    {0x3E,0x51,0x49,0x45,0x3E}, {0x00,0x42,0x7F,0x40,0x00},
-    {0x42,0x61,0x51,0x49,0x46}, {0x21,0x41,0x45,0x4B,0x31},
-    {0x18,0x14,0x12,0x7F,0x10}, {0x27,0x45,0x45,0x45,0x39},
-    {0x3C,0x4A,0x49,0x49,0x30}, {0x01,0x71,0x09,0x05,0x03},
-    {0x36,0x49,0x49,0x49,0x36}, {0x06,0x49,0x49,0x29,0x1E},
-    {0x00,0x36,0x36,0x00,0x00}, {0x00,0x56,0x36,0x00,0x00},
-    {0x08,0x14,0x22,0x41,0x00}, {0x14,0x14,0x14,0x14,0x14},
-    {0x00,0x41,0x22,0x14,0x08}, {0x02,0x01,0x51,0x09,0x06},
-    {0x32,0x49,0x79,0x41,0x3E}, {0x7E,0x11,0x11,0x11,0x7E},
-    {0x7F,0x49,0x49,0x49,0x36}, {0x3E,0x41,0x41,0x41,0x22},
-    {0x7F,0x41,0x41,0x22,0x1C}, {0x7F,0x49,0x49,0x49,0x41},
-    {0x7F,0x09,0x09,0x09,0x01}, {0x3E,0x41,0x49,0x49,0x7A},
-    {0x7F,0x08,0x08,0x08,0x7F}, {0x00,0x41,0x7F,0x41,0x00},
-    {0x20,0x40,0x41,0x3F,0x01}, {0x7F,0x08,0x14,0x22,0x41},
-    {0x7F,0x40,0x40,0x40,0x40}, {0x7F,0x02,0x0C,0x02,0x7F},
-    {0x7F,0x04,0x08,0x10,0x7F}, {0x3E,0x41,0x41,0x41,0x3E},
-    {0x7F,0x09,0x09,0x09,0x06}, {0x3E,0x41,0x51,0x21,0x5E},
-    {0x7F,0x09,0x19,0x29,0x46}, {0x46,0x49,0x49,0x49,0x31},
-    {0x01,0x01,0x7F,0x01,0x01}, {0x3F,0x40,0x40,0x40,0x3F},
-    {0x1F,0x20,0x40,0x20,0x1F}, {0x3F,0x40,0x38,0x40,0x3F},
-    {0x63,0x14,0x08,0x14,0x63}, {0x07,0x08,0x70,0x08,0x07},
-    {0x61,0x51,0x49,0x45,0x43}, {0x00,0x7F,0x41,0x41,0x00},
-    {0x02,0x04,0x08,0x10,0x20}, {0x00,0x41,0x41,0x7F,0x00},
-    {0x04,0x02,0x01,0x02,0x04}, {0x40,0x40,0x40,0x40,0x40},
-    {0x00,0x01,0x02,0x04,0x00}, {0x20,0x54,0x54,0x54,0x78},
-    {0x7F,0x48,0x44,0x44,0x38}, {0x38,0x44,0x44,0x44,0x20},
-    {0x38,0x44,0x44,0x48,0x7F}, {0x38,0x54,0x54,0x54,0x18},
-    {0x08,0x7E,0x09,0x01,0x02}, {0x0C,0x52,0x52,0x52,0x3E},
-    {0x7F,0x08,0x04,0x04,0x78}, {0x00,0x44,0x7D,0x40,0x00},
-    {0x20,0x40,0x44,0x3D,0x00}, {0x7F,0x10,0x28,0x44,0x00},
-    {0x00,0x41,0x7F,0x40,0x00}, {0x7C,0x04,0x18,0x04,0x78},
-    {0x7C,0x08,0x04,0x04,0x78}, {0x38,0x44,0x44,0x44,0x38},
-    {0x7C,0x14,0x14,0x14,0x08}, {0x08,0x14,0x14,0x18,0x7C},
-    {0x7C,0x08,0x04,0x04,0x08}, {0x48,0x54,0x54,0x54,0x20},
-    {0x04,0x3F,0x44,0x40,0x20}, {0x3C,0x40,0x40,0x40,0x7C},
-    {0x1C,0x20,0x40,0x20,0x1C}, {0x3C,0x40,0x30,0x40,0x3C},
-    {0x44,0x28,0x10,0x28,0x44}, {0x0C,0x50,0x50,0x50,0x3C},
-    {0x44,0x64,0x54,0x4C,0x44}, {0x00,0x08,0x36,0x41,0x00},
-    {0x00,0x00,0x7F,0x00,0x00}, {0x00,0x41,0x36,0x08,0x00},
-    {0x10,0x08,0x08,0x10,0x08},
-};
+/* ─── color palette ──────────────────────────────────────────────────────── */
+#define COL_BG        TFT_BLACK
+#define COL_BORDER    TFT_DARKGRAY
+#define COL_HUD_TEXT  TFT_WHITE
+#define COL_HUD_LINE  TFT_DARKGRAY
+#define COL_SNAKE_BODY TFT_GREEN
+#define COL_SNAKE_HEAD TFT_DARKGREEN
+#define COL_SNAKE_EYE  TFT_BLACK
+#define COL_APPLE_BODY TFT_RED
+#define COL_APPLE_STEM TFT_BROWN
+#define COL_APPLE_LEAF TFT_DARKGREEN
 
 /* ─── helpers ────────────────────────────────────────────────────────────── */
 
 static inline int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 
-/* Grid coord → pixel origin, offset by HUD strip */
 static inline int to_px_x(int gx) { return gx * CELL_SIZE; }
 static inline int to_px_y(int gy) { return HUD_H + gy * CELL_SIZE; }
 
@@ -133,24 +93,6 @@ static void dir_delta(Direction d, int *dx, int *dy)
     }
 }
 
-/* ─── font draw (used for HUD score) ────────────────────────────────────── */
-
-static void draw_char_at(int x, int y, char c)
-{
-    if (c < 0x20 || c > 0x7E) c = '?';
-    const uint8_t *g = font5x7[c - 0x20];
-    for (int col = 0; col < 5; col++) {
-        uint8_t bits = g[col];
-        for (int row = 0; row < 8; row++)
-            if (bits & (1<<row)) oled_draw_pixel(x+col, y+row);
-    }
-}
-
-static void draw_str(int x, int y, const char *s)
-{
-    while (*s) { draw_char_at(x, y, *s++); x += 6; }
-}
-
 /* ─── neighbour bitmask for connected body rendering ─────────────────────── */
 
 #define NBR_UP    (1<<0)
@@ -162,7 +104,7 @@ static uint8_t nbr_mask(const SnakeGame *g, int pos)
 {
     SnakeCell cur = body_at(g, pos);
     uint8_t m = 0;
-    int dirs[2] = { pos-1, pos+1 };   /* toward head, toward tail */
+    int dirs[2] = { pos-1, pos+1 };
     int limits[2] = { 0, g->length-1 };
     for (int d = 0; d < 2; d++) {
         int p = dirs[d];
@@ -178,8 +120,11 @@ static uint8_t nbr_mask(const SnakeGame *g, int pos)
 }
 
 /*
- * Body segment — flush on neighbour sides, 1px inset on free sides.
- * This makes adjacent cells share an edge so the snake looks continuous.
+ * Body segment — filled solid green, flush on neighbour sides, 1px inset
+ * on free sides (same connectivity logic as before, now with color fill
+ * instead of a monochrome outline — a solid color body reads far more
+ * clearly as "one continuous creature" than the old hollow-outline look
+ * the 1-bit display required).
  */
 static void draw_segment(int gx, int gy, uint8_t nbr)
 {
@@ -188,14 +133,12 @@ static void draw_segment(int gx, int gy, uint8_t nbr)
     int y0 = py + ((nbr & NBR_UP)    ? 0 : 1);
     int x1 = px + CELL_SIZE - 1 - ((nbr & NBR_RIGHT) ? 0 : 1);
     int y1 = py + CELL_SIZE - 1 - ((nbr & NBR_DOWN)  ? 0 : 1);
-    for (int y = y0; y <= y1; y++)
-        for (int x = x0; x <= x1; x++)
-            oled_draw_pixel(x, y);
+    tft_fill_rect(x0, y0, x1 - x0 + 1, y1 - y0 + 1, COL_SNAKE_BODY);
 }
 
 /*
- * Head — same inset logic as body but with two "eye" pixels left dark.
- * Eyes are placed at the leading corners based on movement direction.
+ * Head — darker green fill (visually distinct from the body color) with
+ * two black "eye" pixels placed at the leading corners based on direction.
  */
 static void draw_head(int gx, int gy, Direction dir, uint8_t nbr)
 {
@@ -205,73 +148,63 @@ static void draw_head(int gx, int gy, Direction dir, uint8_t nbr)
     int x1 = px + CELL_SIZE - 1 - ((nbr & NBR_RIGHT) ? 0 : 1);
     int y1 = py + CELL_SIZE - 1 - ((nbr & NBR_DOWN)  ? 0 : 1);
 
-    /* Eye local coords (relative to px,py) */
+    tft_fill_rect(x0, y0, x1 - x0 + 1, y1 - y0 + 1, COL_SNAKE_HEAD);
+
+    /* Eye positions relative to cell top-left, scaled for CELL_SIZE=8 */
     int e1x, e1y, e2x, e2y;
     switch (dir) {
-        case DIR_RIGHT: e1x=CELL_SIZE-2; e1y=1;          e2x=CELL_SIZE-2; e2y=CELL_SIZE-2; break;
-        case DIR_LEFT:  e1x=1;           e1y=1;          e2x=1;           e2y=CELL_SIZE-2; break;
-        case DIR_UP:    e1x=1;           e1y=1;          e2x=CELL_SIZE-2; e2y=1;           break;
-        case DIR_DOWN:  e1x=1;           e1y=CELL_SIZE-2;e2x=CELL_SIZE-2; e2y=CELL_SIZE-2; break;
+        case DIR_RIGHT: e1x=CELL_SIZE-3; e1y=2;          e2x=CELL_SIZE-3; e2y=CELL_SIZE-3; break;
+        case DIR_LEFT:  e1x=2;           e1y=2;          e2x=2;           e2y=CELL_SIZE-3; break;
+        case DIR_UP:    e1x=2;           e1y=2;          e2x=CELL_SIZE-3; e2y=2;           break;
+        case DIR_DOWN:  e1x=2;           e1y=CELL_SIZE-3;e2x=CELL_SIZE-3; e2y=CELL_SIZE-3; break;
         default:        e1x=-1;e1y=-1;   e2x=-1;e2y=-1; break;
     }
-
-    for (int y = y0; y <= y1; y++) {
-        for (int x = x0; x <= x1; x++) {
-            int lx = x-px, ly = y-py;
-            if ((lx==e1x&&ly==e1y)||(lx==e2x&&ly==e2y)) continue;
-            oled_draw_pixel(x, y);
-        }
-    }
+    tft_draw_pixel(px + e1x, py + e1y, COL_SNAKE_EYE);
+    tft_draw_pixel(px + e2x, py + e2y, COL_SNAKE_EYE);
 }
 
 /*
- * Apple — round body with stem and leaf, drawn centred on the grid cell.
- * At CELL_SIZE=6 the centre is at offset (3,3) from cell top-left.
- *
- *   Pixel pattern (relative to centre cx,cy):
- *        X          cy-3  stem
- *       X           cy-2  leaf (left of stem)
- *      XXXXX        cy-1  body top
- *      XXXXX        cy    body mid
- *      XXXXX        cy+1  body bot
- *       XXX         cy+2  rounded bottom
- *        X          cy+3  tip
+ * Apple — colored round body (red), brown stem, dark green leaf. The
+ * shape itself is identical to the old monochrome version, but having
+ * red flesh + brown stem + green leaf makes it instantly read as "apple"
+ * the way a single-color silhouette never quite could.
  */
 static void draw_apple(int gx, int gy)
 {
     int cx = to_px_x(gx) + CELL_SIZE/2;
     int cy = to_px_y(gy) + CELL_SIZE/2;
 
-    oled_draw_pixel(cx,     cy-3);          /* stem  */
-    oled_draw_pixel(cx-1,   cy-2);          /* leaf  */
-    for (int dx=-2;dx<=2;dx++) oled_draw_pixel(cx+dx, cy-1); /* body  */
-    for (int dx=-2;dx<=2;dx++) oled_draw_pixel(cx+dx, cy  );
-    for (int dx=-2;dx<=2;dx++) oled_draw_pixel(cx+dx, cy+1);
-    for (int dx=-1;dx<=1;dx++) oled_draw_pixel(cx+dx, cy+2); /* round */
-    oled_draw_pixel(cx,     cy+3);          /* tip   */
+    tft_draw_pixel(cx,   cy-3, COL_APPLE_STEM);
+    tft_draw_pixel(cx-1, cy-2, COL_APPLE_LEAF);
+
+    for (int dx=-2;dx<=2;dx++) tft_draw_pixel(cx+dx, cy-1, COL_APPLE_BODY);
+    for (int dx=-2;dx<=2;dx++) tft_draw_pixel(cx+dx, cy,   COL_APPLE_BODY);
+    for (int dx=-2;dx<=2;dx++) tft_draw_pixel(cx+dx, cy+1, COL_APPLE_BODY);
+    for (int dx=-1;dx<=1;dx++) tft_draw_pixel(cx+dx, cy+2, COL_APPLE_BODY);
+    tft_draw_pixel(cx, cy+3, COL_APPLE_BODY);
 }
 
 /* ─── HUD score strip ────────────────────────────────────────────────────── */
 
 static void draw_hud(const SnakeGame *g)
 {
-    char buf[16];
-    snprintf(buf, sizeof(buf), "SCR:%lu", (unsigned long)g->score);
-    draw_str(1, 1, buf);
+    tft_fill_rect(0, 0, TFT_WIDTH, HUD_H, COL_BG);
 
-    /* Thin separator line below HUD */
-    for (int x = 0; x < 128; x++) oled_draw_pixel(x, HUD_H - 1);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "SCORE: %lu", (unsigned long)g->score);
+    font_draw_str(2, 4, buf, COL_HUD_TEXT);
+
+    for (int x = 0; x < TFT_WIDTH; x++) tft_draw_pixel(x, HUD_H - 1, COL_HUD_LINE);
 }
 
 /* ─── border (play area only, below HUD) ─────────────────────────────────── */
 
 static void draw_border(void)
 {
-    /* Top of play area = HUD separator line, already drawn */
-    for (int x = 0; x < 128; x++) oled_draw_pixel(x, 63);   /* bottom */
-    for (int y = HUD_H; y < 64; y++) {
-        oled_draw_pixel(0,   y);   /* left  */
-        oled_draw_pixel(127, y);   /* right */
+    for (int x = 0; x < TFT_WIDTH; x++) tft_draw_pixel(x, TFT_HEIGHT - 1, COL_BORDER);
+    for (int y = HUD_H; y < TFT_HEIGHT; y++) {
+        tft_draw_pixel(0,             y, COL_BORDER);
+        tft_draw_pixel(TFT_WIDTH - 1, y, COL_BORDER);
     }
 }
 
@@ -324,9 +257,6 @@ SnakeStatus snake_tick(SnakeGame *g)
     /* Wall */
     if (nx<0||nx>=GRID_W||ny<0||ny>=GRID_H) {
         g->status = SNAKE_DEAD_WALL;
-        /* Descending death melody — was 3 separate sound_play() calls,
-         * now one atomic melody so it can't be interrupted/interleaved
-         * by another sound queued at nearly the same instant. */
         static const Note death_tune[] = {
             { NOTE_A4, 90 }, { NOTE_F4, 90 }, { NOTE_D4, 90 }, { NOTE_C4, 280 },
         };
@@ -357,10 +287,8 @@ SnakeStatus snake_tick(SnakeGame *g)
         g->length++;
         g->score += 10;
         g->food_eaten++;
-        occ_set(tail.x, tail.y, true);   /* tail didn't slide */
+        occ_set(tail.x, tail.y, true);
 
-        /* Quick upward two-note "eat" chirp instead of a single tone —
-         * sounds more like a satisfying "pickup" than a flat beep */
         static const Note eat_tune[] = { { NOTE_G4, 35 }, { NOTE_C5, 50 } };
         sound_play_melody(eat_tune, sizeof(eat_tune)/sizeof(eat_tune[0]));
 
@@ -376,7 +304,6 @@ SnakeStatus snake_tick(SnakeGame *g)
 
 void snake_draw(const SnakeGame *g)
 {
-    /* Real-time food blink */
     int64_t t = now_ms();
     if ((t - g->food_blink_ms) >= FOOD_BLINK_MS) {
         SnakeGame *gm = (SnakeGame *)g;
@@ -384,20 +311,18 @@ void snake_draw(const SnakeGame *g)
         gm->food_blink_ms = t;
     }
 
+    tft_fill_rect(0, HUD_H, TFT_WIDTH, TFT_HEIGHT - HUD_H, COL_BG);
     draw_hud(g);
     draw_border();
 
-    /* Body — tail to neck */
     for (int i = g->length-1; i >= 1; i--) {
         SnakeCell c = body_at(g, i);
         draw_segment(c.x, c.y, nbr_mask(g, i));
     }
 
-    /* Head */
     SnakeCell h = body_at(g, 0);
     draw_head(h.x, h.y, g->dir, nbr_mask(g, 0));
 
-    /* Apple */
     if (g->food_visible) draw_apple(g->food.x, g->food.y);
 }
 
