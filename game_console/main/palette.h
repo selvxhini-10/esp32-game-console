@@ -53,6 +53,18 @@ extern "C" {
 #define PAL_TITLE           PAL_BLUE_MAIN
 #define PAL_COLLECTIBLE     PAL_GOLD
 #define PAL_GLOW            PAL_BLUE_BRIGHT
+
+/* ── greens ───────────────────────────────────────────── */
+#define PAL_GREEN_DARK     0x0341   // #006B20 — pipe cap, dark vegetation
+#define PAL_GREEN_MAIN     0x0502   // #00A040 — pipe body, grass strip
+#define PAL_GREEN_LIGHT    0x6F6D   // #6AE36B — grass blade tips (keep)
+#define PAL_GREEN_GRASS    0x2E27   // darker grass highlight (keep)
+
+/* ── earth ────────────────────────────────────────────── */
+#define PAL_FOREST         0x02E0   // #0A5C0A — distant hill silhouette
+#define PAL_BROWN_DARK     0x5960   // #5C2E00 — soil texture clumps
+#define PAL_BROWN          0x8A20   // #8B4513 — soil base
+
 #define PAL_DANGER          0xF800   /* TFT_RED — kept distinct from the palette on
                                          purpose: danger/game-over should NOT blend
                                          into the blue family, it needs to visually
@@ -61,6 +73,7 @@ extern "C" {
 #define PAL_SUCCESS         PAL_GOLD /* "good outcome" reuses gold rather than green,
                                          keeping the whole success/collectible
                                          vocabulary in one consistent color family */
+                                         
 
 #ifdef __cplusplus
 }

@@ -46,18 +46,18 @@
    COLOR PALETTE
    ══════════════════════════════════════════════════════════════════════════ */
 
-#define COL_BG          PAL_BACKGROUND
-#define COL_BORDER      PAL_BORDER
-#define COL_TITLE       PAL_TITLE
-#define COL_TEXT        PAL_TEXT
-#define COL_DIM_TEXT    PAL_TEXT_DIM
-#define COL_HILIGHT     PAL_SELECTED
-#define COL_LINE        PAL_BORDER
-#define COL_CURSOR      PAL_CURSOR
-#define COL_COUNTDOWN   PAL_GOLD
-#define COL_BEST        PAL_GOLD
-#define COL_GAMEOVER    PAL_DANGER
-#define COL_NEWBEST     PAL_GOLD
+#define COL_BG PAL_BACKGROUND
+#define COL_BORDER PAL_BORDER
+#define COL_TITLE PAL_TITLE
+#define COL_TEXT PAL_TEXT
+#define COL_DIM_TEXT PAL_TEXT_DIM
+#define COL_HILIGHT PAL_SELECTED
+#define COL_LINE PAL_BORDER
+#define COL_CURSOR PAL_CURSOR
+#define COL_COUNTDOWN PAL_GOLD
+#define COL_BEST PAL_GOLD
+#define COL_GAMEOVER PAL_DANGER
+#define COL_NEWBEST PAL_GOLD
 /*
  * Pause box now pulls from PAL_BG_PANEL — the palette's own dedicated
  * panel color — instead of a one-off hardcoded gray. Independently
@@ -67,16 +67,16 @@
  * other panel/menu surface across the console now that they all share
  * one palette.
  */
-#define COL_PAUSE_BOX    PAL_PANEL_BG
+#define COL_PAUSE_BOX PAL_PANEL_BG
 #define COL_PAUSE_BORDER PAL_BLUE_MAIN
-#define COL_PAUSE_TITLE  PAL_GOLD   /* gold still pops clearly against the dark panel */
+#define COL_PAUSE_TITLE PAL_BG_DARK
 
 /* ══════════════════════════════════════════════════════════════════════════
    SNAKE WRAPPERS  (adapts SnakeGame to the GameDesc interface)
    ══════════════════════════════════════════════════════════════════════════ */
 
 static SnakeGame s_snake;
-static int64_t   s_snake_step_ts;
+static int64_t s_snake_step_ts;
 
 static void snake_w_init(void)
 {
@@ -93,10 +93,15 @@ static void snake_w_input(int dx, int dy, bool btn)
 static bool snake_w_tick(uint32_t *sc)
 {
     int64_t now = esp_timer_get_time() / 1000;
-    if ((now - s_snake_step_ts) >= snake_get_step_ms(&s_snake)) {
+    if ((now - s_snake_step_ts) >= snake_get_step_ms(&s_snake))
+    {
         s_snake_step_ts = now;
         SnakeStatus st = snake_tick(&s_snake);
-        if (st != SNAKE_ALIVE) { *sc = snake_get_score(&s_snake); return false; }
+        if (st != SNAKE_ALIVE)
+        {
+            *sc = snake_get_score(&s_snake);
+            return false;
+        }
     }
     *sc = snake_get_score(&s_snake);
     return true;
@@ -109,40 +114,22 @@ static void snake_w_draw(void) { snake_draw(&s_snake); }
    ══════════════════════════════════════════════════════════════════════════ */
 
 static const GameDesc s_games[] = {
-    {
-        "SNAKE", snake_w_init, snake_w_input, snake_w_tick, snake_w_draw,
-        { "JOYSTICK: MOVE", "EAT APPLES TO GROW", "AVOID WALLS & SELF", NULL }
-    },
-    {
-        "PONG", pong_init, pong_input, pong_tick, pong_draw,
-        { "LEFT/RIGHT: PADDLE", "BOUNCE BALL UP", "DON'T MISS IT", NULL }
-    },
-    {
-        "BREAKOUT", breakout_init, breakout_input, breakout_tick, breakout_draw,
-        { "LEFT/RIGHT: PADDLE", "BREAK ALL BRICKS", "3 LIVES TOTAL", NULL }
-    },
-    {
-        "FLAPPY", flappy_init, flappy_input, flappy_tick, flappy_draw,
-        { "ACTION BTN: FLAP", "CLEAR THE PIPES", "AVOID GROUND/TOP", NULL }
-    },
-    {
-        "INVADERS", spaceinvaders_init, spaceinvaders_input,
-        spaceinvaders_tick, spaceinvaders_draw,
-        { "LEFT/RIGHT: MOVE", "ACTION BTN: SHOOT", "STOP THEM LANDING", NULL }
-    },
-    {
-        "MAZE", maze_init, maze_input, maze_tick, maze_draw,
-        { "JOYSTICK: WALK", "COLLECT COINS", "PAUSE BTN: MENU", "TO EXIT MAZE" }
-    },
+    {"SNAKE", snake_w_init, snake_w_input, snake_w_tick, snake_w_draw, {"JOYSTICK: MOVE", "EAT APPLES TO GROW", "AVOID WALLS & SELF", NULL}},
+    {"PONG", pong_init, pong_input, pong_tick, pong_draw, {"LEFT/RIGHT: PADDLE", "BOUNCE BALL UP", "DON'T MISS IT", NULL}},
+    {"BREAKOUT", breakout_init, breakout_input, breakout_tick, breakout_draw, {"LEFT/RIGHT: PADDLE", "BREAK ALL BRICKS", "3 LIVES TOTAL", NULL}},
+    {"FLAPPY", flappy_init, flappy_input, flappy_tick, flappy_draw, {"ACTION BTN: FLAP", "CLEAR THE PIPES", "AVOID GROUND/TOP", NULL}},
+    {"INVADERS", spaceinvaders_init, spaceinvaders_input, spaceinvaders_tick, spaceinvaders_draw, {"LEFT/RIGHT: MOVE", "ACTION BTN: SHOOT", "STOP THEM LANDING", NULL}},
+    {"MAZE", maze_init, maze_input, maze_tick, maze_draw, {"JOYSTICK: WALK", "COLLECT COINS", "PAUSE BTN: MENU", "TO EXIT MAZE"}},
 };
 
-#define GAME_COUNT  ((int)(sizeof(s_games) / sizeof(s_games[0])))
+#define GAME_COUNT ((int)(sizeof(s_games) / sizeof(s_games[0])))
 
 /* ══════════════════════════════════════════════════════════════════════════
    CONSOLE STATE MACHINE
    ══════════════════════════════════════════════════════════════════════════ */
 
-typedef enum {
+typedef enum
+{
     CON_SELECTING,
     CON_COUNTDOWN,
     CON_PLAYING,
@@ -151,13 +138,15 @@ typedef enum {
     CON_GAME_OVER,
 } ConState;
 
-typedef enum {
+typedef enum
+{
     GO_RETRY = 0,
     GO_MENU,
     GO_ITEM_COUNT
 } GoItem;
 
-typedef enum {
+typedef enum
+{
     PAUSE_RESUME = 0,
     PAUSE_HELP,
     PAUSE_QUIT,
@@ -166,19 +155,19 @@ typedef enum {
 
 /* ── state variables ──────────────────────────────────────────────────────── */
 
-static ConState  s_state       = CON_SELECTING;
-static int       s_sel         = 0;
-static uint32_t  s_hi[GAME_COUNT];
-static uint32_t  s_last_score  = 0;
-static GoItem    s_go_sel      = GO_RETRY;
-static PauseItem s_pause_sel   = PAUSE_RESUME;
-static int       s_countdown   = 3;
-static int64_t   s_cd_tick     = 0;
+static ConState s_state = CON_SELECTING;
+static int s_sel = 0;
+static uint32_t s_hi[GAME_COUNT];
+static uint32_t s_last_score = 0;
+static GoItem s_go_sel = GO_RETRY;
+static PauseItem s_pause_sel = PAUSE_RESUME;
+static int s_countdown = 3;
+static int64_t s_cd_tick = 0;
 
-static bool    s_blink      = true;
+static bool s_blink = true;
 static int64_t s_blink_tick = 0;
 
-static int  s_last_dy  = 0;
+static int s_last_dy = 0;
 static bool s_last_menu_btn = false;
 
 static const char *s_nvs_keys[GAME_COUNT];
@@ -221,33 +210,46 @@ static void draw_border(void)
  * even at a glance.
  */
 static void draw_selector(const char **items, int count, int sel,
-                           int y_start, int row_h)
+                          int y_start, int row_h)
 {
     int max_len = 0;
-    for (int i = 0; i < count; i++) {
-        int l = 0; for (const char *p = items[i]; *p; p++) l++;
-        if (l > max_len) max_len = l;
+    for (int i = 0; i < count; i++)
+    {
+        int l = 0;
+        for (const char *p = items[i]; *p; p++)
+            l++;
+        if (l > max_len)
+            max_len = l;
     }
     int block_w = (2 + max_len) * 6;
     int block_x = (TFT_WIDTH - block_w) / 2;
-    if (block_x < 0) block_x = 0;
+    if (block_x < 0)
+        block_x = 0;
     int label_x = block_x + 12;
 
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < count; i++)
+    {
         int y = y_start + i * row_h;
         bool is_sel = (i == sel);
 
-        if (is_sel) {
-            /* Highlight bar behind the selected row — main palette blue,
-             * filling almost the full row height for a clear "selected"
-             * block rather than relying on text color alone. */
-            tft_fill_rect(block_x - 2, y - 2, block_w + 4, row_h - 2, PAL_BLUE_MAIN);
+        if (is_sel)
+        {
+            /* PAL_BLUE_MAIN bar (#3AA8FF) — clearly visible against the
+             * deep navy PAL_BG_DARK box; PAL_BG_DARK text on top gives
+             * the strongest possible contrast (dark-on-bright).         */
+            tft_fill_rect(block_x - 2, y - 2, block_w + 4, row_h - 2,
+                          PAL_BG_DARK);
             font_draw_str(label_x, y, items[i], PAL_WHITE);
-        } else {
-            font_draw_str(label_x, y, items[i], COL_DIM_TEXT);
+        }
+        else
+        {
+            /* Unselected: PAL_OUTLINE text — visibly dimmer than the
+             * selected row but still readable against the dark box.     */
+            font_draw_str(label_x, y, items[i], PAL_BG_DARK);
         }
 
-        if (is_sel && s_blink) font_draw_char(block_x - 10, y, '>', PAL_BLUE_BRIGHT);
+        if (is_sel && s_blink)
+            font_draw_char(block_x - 10, y, '>', PAL_BLUE_BRIGHT);
     }
 }
 
@@ -277,10 +279,11 @@ static void draw_select_screen(void)
     draw_border();
 
     font_draw_str_centred(3, "SELECT GAME", COL_TITLE, TFT_WIDTH);
-    for (int x = 1; x < TFT_WIDTH-1; x++) tft_draw_pixel(x, 14, COL_LINE);
+    for (int x = 1; x < TFT_WIDTH - 1; x++)
+        tft_draw_pixel(x, 14, COL_LINE);
 
     int prev_i = (s_sel - 1 + GAME_COUNT) % GAME_COUNT;
-    int next_i = (s_sel + 1)              % GAME_COUNT;
+    int next_i = (s_sel + 1) % GAME_COUNT;
 
     font_draw_str_centred(24, s_games[prev_i].name, COL_DIM_TEXT, TFT_WIDTH);
 
@@ -296,30 +299,36 @@ static void draw_select_screen(void)
      */
     {
         const char *name = s_games[s_sel].name;
-        int len = 0; for (const char *p = name; *p; p++) len++;
-        int name_w  = len * 11;          /* 2x font: 11px per char        */
-        int total_w = name_w + 2 * 11;   /* "[" + name + "]" — 2 brackets */
-        int bx      = (TFT_WIDTH - total_w) / 2;
-        if (bx < 0) bx = 0;
-        font_draw_str_2x(bx,             50, "[", COL_HILIGHT);
-        font_draw_str_2x(bx + 11,        50, name, COL_HILIGHT);
+        int len = 0;
+        for (const char *p = name; *p; p++)
+            len++;
+        int name_w = len * 11;         /* 2x font: 11px per char        */
+        int total_w = name_w + 2 * 11; /* "[" + name + "]" — 2 brackets */
+        int bx = (TFT_WIDTH - total_w) / 2;
+        if (bx < 0)
+            bx = 0;
+        font_draw_str_2x(bx, 50, "[", COL_HILIGHT);
+        font_draw_str_2x(bx + 11, 50, name, COL_HILIGHT);
         font_draw_str_2x(bx + 11 + name_w, 50, "]", COL_HILIGHT);
     }
 
     font_draw_str_centred(78, s_games[next_i].name, COL_DIM_TEXT, TFT_WIDTH);
 
-    if (s_blink) {
+    if (s_blink)
+    {
         font_draw_char(76, 16, '^', COL_TITLE);
         font_draw_char(76, 88, 'v', COL_TITLE);
     }
 
-    for (int x = 1; x < TFT_WIDTH-1; x++) tft_draw_pixel(x, 96, COL_LINE);
+    for (int x = 1; x < TFT_WIDTH - 1; x++)
+        tft_draw_pixel(x, 96, COL_LINE);
 
     char buf[24];
     snprintf(buf, sizeof(buf), "BEST: %lu", (unsigned long)s_hi[s_sel]);
     font_draw_str_centred(102, buf, COL_BEST, TFT_WIDTH);
 
-    if (s_blink) {
+    if (s_blink)
+    {
         font_draw_str_centred(116, "PRESS TO START", COL_TEXT, TFT_WIDTH);
     }
 }
@@ -331,7 +340,8 @@ static void draw_countdown(void)
 {
     draw_border();
     font_draw_str_centred(20, "GET READY", COL_TITLE, TFT_WIDTH);
-    for (int x = 1; x < TFT_WIDTH-1; x++) tft_draw_pixel(x, 34, COL_LINE);
+    for (int x = 1; x < TFT_WIDTH - 1; x++)
+        tft_draw_pixel(x, 34, COL_LINE);
 
     char buf[4];
     snprintf(buf, sizeof(buf), "%d", s_countdown);
@@ -370,7 +380,7 @@ static void draw_pause_overlay(void)
      * for the new 160px width either. Recalculated from scratch:
      */
     int box_w = 130, box_h = 80;
-    int bx0 = (TFT_WIDTH  - box_w) / 2;
+    int bx0 = (TFT_WIDTH - box_w) / 2;
     int by0 = (TFT_HEIGHT - box_h) / 2;
     int bx1 = bx0 + box_w;
     int by1 = by0 + box_h;
@@ -390,16 +400,19 @@ static void draw_pause_overlay(void)
      */
     {
         const char *title = "-- PAUSED --";
-        int len = 0; for (const char *p = title; *p; p++) len++;
+        int len = 0;
+        for (const char *p = title; *p; p++)
+            len++;
         int tw = len * 6;
         int tx = bx0 + (box_w - tw) / 2;
         font_draw_str(tx, by0 + 8, title, COL_PAUSE_TITLE);
     }
 
-    const char *p_items[] = { "RESUME", "HELP", "QUIT" };
+    const char *p_items[] = {"RESUME", "HELP", "QUIT"};
     draw_selector(p_items, PAUSE_ITEM_COUNT, (int)s_pause_sel, by0 + 26, 16);
 
-    (void)bx1; (void)by1;
+    (void)bx1;
+    (void)by1;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -431,7 +444,8 @@ static void draw_help_screen(void)
     draw_border();
 
     font_draw_str_centred(4, s_games[s_sel].name, COL_TITLE, TFT_WIDTH);
-    for (int x = 1; x < TFT_WIDTH-1; x++) tft_draw_pixel(x, 18, COL_LINE);
+    for (int x = 1; x < TFT_WIDTH - 1; x++)
+        tft_draw_pixel(x, 18, COL_LINE);
 
     /* Dark panel box for the help text itself */
     int bx0 = 10, by0 = 24, box_w = TFT_WIDTH - 20, box_h = 80;
@@ -439,13 +453,16 @@ static void draw_help_screen(void)
     tft_draw_rect(bx0, by0, box_w, box_h, PAL_BLUE_MAIN);
 
     int y = by0 + 8;
-    for (int i = 0; i < 4 && s_games[s_sel].help[i] != NULL; i++) {
+    for (int i = 0; i < 4 && s_games[s_sel].help[i] != NULL; i++)
+    {
         font_draw_str_centred(y, s_games[s_sel].help[i], PAL_WHITE, TFT_WIDTH);
         y += 18;
     }
 
-    for (int x = 1; x < TFT_WIDTH-1; x++) tft_draw_pixel(x, 110, COL_LINE);
-    if (s_blink) font_draw_str_centred(116, "JOYSTICK BTN: BACK", COL_DIM_TEXT, TFT_WIDTH);
+    for (int x = 1; x < TFT_WIDTH - 1; x++)
+        tft_draw_pixel(x, 110, COL_LINE);
+    if (s_blink)
+        font_draw_str_centred(116, "JOYSTICK BTN: BACK", COL_DIM_TEXT, TFT_WIDTH);
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
@@ -485,21 +502,26 @@ static void draw_game_over(void)
     draw_border();
 
     font_draw_str_2x_centred(4, "GAME OVER", COL_GAMEOVER, TFT_WIDTH);
-    for (int x = 1; x < TFT_WIDTH-1; x++) tft_draw_pixel(x, 24, COL_LINE);
+    for (int x = 1; x < TFT_WIDTH - 1; x++)
+        tft_draw_pixel(x, 24, COL_LINE);
 
     char buf[24];
     snprintf(buf, sizeof(buf), "SCORE: %lu", (unsigned long)s_last_score);
     font_draw_str_centred(30, buf, COL_TEXT, TFT_WIDTH);
 
     bool new_best = (s_last_score > 0 && s_last_score >= s_hi[s_sel]);
-    if (new_best) {
+    if (new_best)
+    {
         font_draw_str_centred(42, "** NEW BEST **", COL_NEWBEST, TFT_WIDTH);
-    } else {
+    }
+    else
+    {
         snprintf(buf, sizeof(buf), "BEST: %lu", (unsigned long)s_hi[s_sel]);
         font_draw_str_centred(42, buf, COL_BEST, TFT_WIDTH);
     }
 
-    for (int x = 1; x < TFT_WIDTH-1; x++) tft_draw_pixel(x, 56, COL_LINE);
+    for (int x = 1; x < TFT_WIDTH - 1; x++)
+        tft_draw_pixel(x, 56, COL_LINE);
 
     /* Selector panel — fills the remaining vertical space down to a
      * comfortable margin above the bottom border */
@@ -507,7 +529,7 @@ static void draw_game_over(void)
     tft_fill_rect(8, panel_y, TFT_WIDTH - 16, panel_h, PAL_PANEL_BG);
     tft_draw_rect(8, panel_y, TFT_WIDTH - 16, panel_h, PAL_BLUE_MAIN);
 
-    const char *go_items[] = { "RETRY", "MAIN MENU" };
+    const char *go_items[] = {"RETRY", "MAIN MENU"};
     draw_selector(go_items, GO_ITEM_COUNT, (int)s_go_sel, panel_y + 10, 18);
 }
 
@@ -524,21 +546,22 @@ void console_init(void)
     keys[3] = "hi_flappy";
     keys[4] = "hi_invaders";
     keys[5] = "hi_maze";
-    for (int i = 0; i < GAME_COUNT; i++) {
+    for (int i = 0; i < GAME_COUNT; i++)
+    {
         s_nvs_keys[i] = keys[i];
-        s_hi[i]       = nvs_scores_get(keys[i]);
+        s_hi[i] = nvs_scores_get(keys[i]);
     }
 
-    s_state       = CON_SELECTING;
-    s_sel         = 0;
-    s_last_score  = 0;
-    s_go_sel      = GO_RETRY;
-    s_pause_sel   = PAUSE_RESUME;
-    s_countdown   = 3;
-    s_cd_tick     = con_now();
-    s_blink       = true;
-    s_blink_tick  = con_now();
-    s_last_dy     = 0;
+    s_state = CON_SELECTING;
+    s_sel = 0;
+    s_last_score = 0;
+    s_go_sel = GO_RETRY;
+    s_pause_sel = PAUSE_RESUME;
+    s_countdown = 3;
+    s_cd_tick = con_now();
+    s_blink = true;
+    s_blink_tick = con_now();
+    s_last_dy = 0;
 
     /* Ambient twinkling starfield for menu screens — purely decorative,
      * matches the reference image's starry background motif. */
@@ -550,28 +573,32 @@ void console_input(int dx, int dy, bool menu_btn, bool action_btn)
 {
     int64_t now = con_now();
 
-    if ((now - s_blink_tick) >= 500) {
-        s_blink      = !s_blink;
+    if ((now - s_blink_tick) >= 500)
+    {
+        s_blink = !s_blink;
         s_blink_tick = now;
     }
 
     bool menu_btn_pressed = (menu_btn && !s_last_menu_btn);
-    bool dy_new           = (dy != 0 && s_last_dy == 0);
-    s_last_dy  = dy;
+    bool dy_new = (dy != 0 && s_last_dy == 0);
+    s_last_dy = dy;
 
     s_last_menu_btn = menu_btn;
 
-    switch (s_state) {
+    switch (s_state)
+    {
 
     case CON_SELECTING:
-        if (dy_new) {
+        if (dy_new)
+        {
             s_sel = (s_sel + dy + GAME_COUNT) % GAME_COUNT;
             sound_play(NOTE_C4, 25);
         }
-        if (menu_btn_pressed) {
+        if (menu_btn_pressed)
+        {
             s_countdown = 3;
-            s_cd_tick   = now;
-            s_state     = CON_COUNTDOWN;
+            s_cd_tick = now;
+            s_state = CON_COUNTDOWN;
             sound_play(NOTE_G4, 60);
         }
         break;
@@ -584,19 +611,26 @@ void console_input(int dx, int dy, bool menu_btn, bool action_btn)
         break;
 
     case CON_PAUSED:
-        if (dy_new) {
+        if (dy_new)
+        {
             int n = ((int)s_pause_sel + dy + PAUSE_ITEM_COUNT) % PAUSE_ITEM_COUNT;
             s_pause_sel = (PauseItem)n;
             sound_play(NOTE_C4, 25);
         }
-        if (menu_btn_pressed) {
-            if (s_pause_sel == PAUSE_RESUME) {
+        if (menu_btn_pressed)
+        {
+            if (s_pause_sel == PAUSE_RESUME)
+            {
                 s_state = CON_PLAYING;
                 sound_play(NOTE_E4, 60);
-            } else if (s_pause_sel == PAUSE_HELP) {
+            }
+            else if (s_pause_sel == PAUSE_HELP)
+            {
                 s_state = CON_HELP;
                 sound_play(NOTE_G4, 50);
-            } else {
+            }
+            else
+            {
                 s_state = CON_SELECTING;
                 sound_play(NOTE_C4, 80);
             }
@@ -604,25 +638,31 @@ void console_input(int dx, int dy, bool menu_btn, bool action_btn)
         break;
 
     case CON_HELP:
-        if (menu_btn_pressed) {
+        if (menu_btn_pressed)
+        {
             s_state = CON_PAUSED;
             sound_play(NOTE_C4, 40);
         }
         break;
 
     case CON_GAME_OVER:
-        if (dy_new) {
+        if (dy_new)
+        {
             int n = ((int)s_go_sel + dy + GO_ITEM_COUNT) % GO_ITEM_COUNT;
             s_go_sel = (GoItem)n;
             sound_play(NOTE_C4, 25);
         }
-        if (menu_btn_pressed) {
-            if (s_go_sel == GO_RETRY) {
+        if (menu_btn_pressed)
+        {
+            if (s_go_sel == GO_RETRY)
+            {
                 s_countdown = 3;
-                s_cd_tick   = now;
-                s_state     = CON_COUNTDOWN;
+                s_cd_tick = now;
+                s_state = CON_COUNTDOWN;
                 sound_play(NOTE_G4, 60);
-            } else {
+            }
+            else
+            {
                 s_state = CON_SELECTING;
                 sound_play(NOTE_C4, 80);
             }
@@ -633,9 +673,10 @@ void console_input(int dx, int dy, bool menu_btn, bool action_btn)
 
 void console_pause_request(void)
 {
-    if (s_state == CON_PLAYING) {
+    if (s_state == CON_PLAYING)
+    {
         sound_play(NOTE_E4, 50);
-        s_state     = CON_PAUSED;
+        s_state = CON_PAUSED;
         s_pause_sel = PAUSE_RESUME;
     }
 }
@@ -644,24 +685,27 @@ void console_tick(void)
 {
     int64_t now = con_now();
 
-    switch (s_state) {
+    switch (s_state)
+    {
 
     case CON_SELECTING:
         tft_fill_rect(0, 0, TFT_WIDTH, TFT_HEIGHT, COL_BG);
-        effects_stars_draw();   /* ambient starfield, drawn behind menu content */
+        effects_stars_draw(); /* ambient starfield, drawn behind menu content */
         draw_select_screen();
         break;
 
     case CON_COUNTDOWN:
-        if ((now - s_cd_tick) >= 1000) {
+        if ((now - s_cd_tick) >= 1000)
+        {
             s_countdown--;
             s_cd_tick = now;
 
-            if (s_countdown <= 0) {
+            if (s_countdown <= 0)
+            {
                 s_games[s_sel].init();
                 s_state = CON_PLAYING;
-                static const Note launch_tune[] = { { NOTE_C5, 60 }, { NOTE_E5, 90 } };
-                sound_play_melody(launch_tune, sizeof(launch_tune)/sizeof(launch_tune[0]));
+                static const Note launch_tune[] = {{NOTE_C5, 60}, {NOTE_E5, 90}};
+                sound_play_melody(launch_tune, sizeof(launch_tune) / sizeof(launch_tune[0]));
                 break;
             }
             sound_play(NOTE_A4, 50);
@@ -670,33 +714,44 @@ void console_tick(void)
         draw_countdown();
         break;
 
-    case CON_PLAYING: {
-        uint32_t sc   = 0;
-        bool     alive = s_games[s_sel].tick(&sc);
+    case CON_PLAYING:
+    {
+        uint32_t sc = 0;
+        bool alive = s_games[s_sel].tick(&sc);
         s_games[s_sel].draw();
-        if (!alive) {
+        if (!alive)
+        {
             s_last_score = sc;
             bool new_best = (sc > s_hi[s_sel]);
 
-            if (new_best) {
+            if (new_best)
+            {
                 s_hi[s_sel] = sc;
                 nvs_scores_set(s_nvs_keys[s_sel], sc);
             }
 
-            if (new_best && sc > 0) {
+            if (new_best && sc > 0)
+            {
                 static const Note hiscore_tune[] = {
-                    { NOTE_C5, 80 }, { NOTE_E5, 80 }, { NOTE_G5, 80 }, { NOTE_C6, 150 },
+                    {NOTE_C5, 80},
+                    {NOTE_E5, 80},
+                    {NOTE_G5, 80},
+                    {NOTE_C6, 150},
                 };
-                sound_play_melody(hiscore_tune, sizeof(hiscore_tune)/sizeof(hiscore_tune[0]));
-            } else {
+                sound_play_melody(hiscore_tune, sizeof(hiscore_tune) / sizeof(hiscore_tune[0]));
+            }
+            else
+            {
                 static const Note gameover_tune[] = {
-                    { NOTE_G4, 90 }, { NOTE_E4, 90 }, { NOTE_C4, 200 },
+                    {NOTE_G4, 90},
+                    {NOTE_E4, 90},
+                    {NOTE_C4, 200},
                 };
-                sound_play_melody(gameover_tune, sizeof(gameover_tune)/sizeof(gameover_tune[0]));
+                sound_play_melody(gameover_tune, sizeof(gameover_tune) / sizeof(gameover_tune[0]));
             }
 
             s_go_sel = GO_RETRY;
-            s_state  = CON_GAME_OVER;
+            s_state = CON_GAME_OVER;
         }
         break;
     }
