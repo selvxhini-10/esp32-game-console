@@ -248,8 +248,10 @@ static void draw_selector(const char **items, int count, int sel,
             font_draw_str(label_x, y, items[i], PAL_BG_DARK);
         }
 
-        if (is_sel && s_blink)
-            font_draw_char(block_x - 10, y, '>', PAL_BLUE_BRIGHT);
+        if (is_sel && s_blink) {
+            font_draw_char(block_x - 10, y, '>', PAL_BG_DARK);
+        }
+
     }
 }
 
@@ -455,7 +457,7 @@ static void draw_help_screen(void)
     int y = by0 + 8;
     for (int i = 0; i < 4 && s_games[s_sel].help[i] != NULL; i++)
     {
-        font_draw_str_centred(y, s_games[s_sel].help[i], PAL_WHITE, TFT_WIDTH);
+        font_draw_str_centred(y, s_games[s_sel].help[i], PAL_BG_DARK, TFT_WIDTH);
         y += 18;
     }
 
