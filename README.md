@@ -2,6 +2,7 @@
 
 A fully self-contained retro arcade handheld built on an ESP32 microcontroller, featuring a color TFT display, six original games, a cohesive pixel-art aesthetic, and a polished boot experience — all implemented in C with FreeRTOS on ESP-IDF v6.
 
+<img width="4284" height="5712" alt="IMG_1824_(1)" src="https://github.com/user-attachments/assets/d376fef2-8762-476e-bd60-a375f944d635" />
 ---
 
 ## Table of Contents
