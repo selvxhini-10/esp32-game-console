@@ -1,6 +1,6 @@
 # ESP32 Handheld Game Console
 
-A fully self-contained retro arcade handheld built on an ESP32 microcontroller, featuring a color TFT display, six original games, a cohesive pixel-art aesthetic, and a polished boot experience — all implemented in C with FreeRTOS on ESP-IDF v6.
+A fully self-contained retro arcade handheld built on an ESP32 microcontroller, featuring a color TFT display, six games, a cohesive pixel-art aesthetic, and a polished boot experience — all implemented in C with FreeRTOS on ESP-IDF v6.
 
 <img width="4284" height="5712" alt="IMG_1824_(1)" src="https://github.com/user-attachments/assets/d376fef2-8762-476e-bd60-a375f944d635" />
 ---
@@ -31,7 +31,7 @@ A fully self-contained retro arcade handheld built on an ESP32 microcontroller, 
 | Microcontroller | ESP32 (dual-core Xtensa LX6, 240 MHz) | CPU0: main game loop / UI. CPU1: audio queue |
 | Display | 1.8" ST7735S TFT, 160×128, SPI | Landscape orientation (MADCTL configured) |
 | Joystick | Analog thumbstick (2-axis + click) | ADC oneshot — X/Y read each frame |
-| Buttons | 3× GPIO pushbuttons | GPIO26: pause menu. GPIO27: action/flap/shoot. Joystick click: confirm/back |
+| Buttons | 2× GPIO pushbuttons | GPIO26: pause menu. GPIO27: action/flap/shoot. Joystick click: confirm/back |
 | Buzzer | Passive piezo buzzer | Driven by LEDC PWM peripheral on CPU1 |
 | Persistence | ESP32 NVS (Non-Volatile Storage) | One key per game for high score |
 
